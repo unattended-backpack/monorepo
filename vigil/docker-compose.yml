@@ -1,0 +1,53 @@
+services:
+  public-node:
+    build: .
+    networks:
+      public: {}
+
+  nat-node:
+    build: .
+    ports:
+      - "8000:8000" # Port forwarding for simulating NAT with port forwarding
+    networks:
+      nat: {}
+
+  # Create two nodes on a private network to test mDNS connectivity.
+  private-node-1:
+    container_name: private-one
+    build: .
+    networks:
+      private: {}
+  private-node-2:
+    container_name: private-two
+    build: .
+    networks:
+      private: {}
+
+  dns-server:
+    image: andyshinn/dnsmasq
+    cap_add:
+      - NET_ADMIN
+    networks:
+      public:
+        ipv4_address: 172.25.0.254
+    volumes:
+      - ./dnsmasq.conf:/etc/dnsmasq.conf
+
+networks:
+  public:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.25.0.0/16
+
+  nat:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.26.0.0/16
+
+  private:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.27.0.0/16
