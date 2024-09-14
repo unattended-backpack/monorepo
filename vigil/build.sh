@@ -41,7 +41,7 @@ $CRATE_NAME = { path = \"$LOCAL_PATH\" }
   else
     echo "-> local $CRATE_NAME not found: using updated remote ..."
     cargo clean -p $CRATE_NAME
-    Ecargo update -p $CRATE_NAME
+    cargo update -p $CRATE_NAME
   fi
 done <<< "$OVERRIDES"
 
