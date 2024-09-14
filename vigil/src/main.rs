@@ -89,17 +89,16 @@ async fn main() -> Result<(), Box<dyn Error>> {
                 gossipsub_config,
             )?;
 
-            let version_string = "vigil/1.0".to_string();
-            let mdns_config = mdns::Config::default();
-            mdns_config.name();
-            mdns_config.set_name(&version_string)?;
+            let agent_string = "vigil/1.0.0".to_string();
+            let mdns_string = agent_string.replace(['/', '.'], "_");
+            let mdns_config = mdns::Config::default().set_name(&mdns_string)?;
             let mdns = mdns::tokio::Behaviour::new(mdns_config, key.public().to_peer_id())?;
 
             // Prepare a means to identify this client.
             // TODO: expose full config options.
             let identify = identify::Behaviour::new(
-                identify::Config::new(version_string.clone(), key.public())
-                    .with_agent_version(version_string.clone()),
+                identify::Config::new(agent_string.clone(), key.public())
+                    .with_agent_version(agent_string.clone()),
             );
 
             Ok(MyBehaviour {
@@ -156,7 +155,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
                 SwarmEvent::OutgoingConnectionError { peer_id, error, .. } => {
                     println!("Failed to connect to {:?}: {:?}", peer_id, error);
                 },
-                SwarmEvent::Behaviour(MyBehaviourEvent::Identify(identify::Event::Received { peer_id, info })) => {
+                SwarmEvent::Behaviour(MyBehaviourEvent::Identify(identify::Event::Received { connection_id, peer_id, info })) => {
                     println!("Identified Peer: {}, AgentVersion: {}", peer_id, info.agent_version);
                     // TODO: Add some rules about peer rejection based on semver plus environment
                     // overrides.

@@ -2,14 +2,14 @@
 name = "vigil"
 version = "0.1.0"
 edition = "2021"
+build = "build.rs"
 
 [dependencies]
-#async-std = "1.10.0"
 clap = { version = "4.3.0", features = ["derive"] }
 clap-verbosity-flag = "2.0.1"
 env_logger = "0.9"
 futures = "0.3"
-libp2p = { git = "https://github.com/trustless-truths/rust-libp2p.git", branch = "patch/v1", features = ["dcutr", "dns", "gossipsub", "identify", "kad", "macros", "mdns", "noise", "quic", "relay", "tcp", "tls", "tokio", "yamux"] }
+libp2p = { git = "https://github.com/unattended-backpack/rust-libp2p.git", branch = "patch/v1", features = ["dcutr", "dns", "gossipsub", "identify", "kad", "macros", "mdns", "noise", "quic", "relay", "tcp", "tls", "tokio", "yamux"] }
 libp2p-identity = { version = "0.2.8" }
 libp2p-quic = { version = "0.10.2" }
 log = "0.4"
