@@ -1,4 +1,7 @@
 use futures::stream::StreamExt;
+use jsonrpsee::core::async_trait;
+use jsonrpsee::proc_macros::rpc;
+use jsonrpsee::server::{RpcModule, ServerBuilder};
 use libp2p::{
     core::Multiaddr,
     dns, gossipsub, identify, mdns, noise, quic,
@@ -12,6 +15,21 @@ use std::hash::{Hash, Hasher};
 use std::time::Duration;
 use tokio::{io, io::AsyncBufReadExt, select};
 use tracing_subscriber::EnvFilter;
+
+#[rpc(server)]
+pub trait MyApi {
+    #[method(name = "say_hello")]
+    async fn say_hello(&self, name: String) -> jsonrpsee::core::RpcResult<String>;
+}
+
+pub struct MyApiImpl;
+
+#[async_trait]
+impl MyApiServer for MyApiImpl {
+    async fn say_hello(&self, name: String) -> jsonrpsee::core::RpcResult<String> {
+        Ok(format!("Hello, {}!", name))
+    }
+}
 
 // We create a custom network behaviour that combines Gossipsub and Mdns.
 #[derive(NetworkBehaviour)]
@@ -28,6 +46,16 @@ async fn main() -> Result<(), Box<dyn Error>> {
         .try_init();
 
     // TODO: clap/tracing/various env stuff
+
+    // Start an RPC server.
+    let server = ServerBuilder::default().build("127.0.0.1:3030").await?;
+    let mut module = RpcModule::new(());
+    module.merge(MyApiImpl.into_rpc())?;
+    let handle = server.start(module);
+
+    // Wait for server to finish or Ctrl-C
+    // tokio::signal::ctrl_c().await?;
+    // handle.stopped().await;
 
     // Generate a private key for this node.
     let key = Keypair::generate_ed25519();
@@ -89,7 +117,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
                 gossipsub_config,
             )?;
 
-            let agent_string = "vigil/1.0.0".to_string();
+            let agent_string = "sigil/1.0.0".to_string();
             let mdns_string = agent_string.replace(['/', '.'], "_");
             let mdns_config = mdns::Config::default().set_name(&mdns_string)?;
             let mdns = mdns::tokio::Behaviour::new(mdns_config, key.public().to_peer_id())?;
@@ -127,7 +155,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
     // let dial_result = swarm.dial(remote_peer);
     // println!("dial result {:?}", dial_result);
 
-    println!("Enter messages via STDIN and they will be sent to connected peers using Gossipsub");
+    println!("Sigil is alive.");
 
     // TODO: add JSON-RPC server that runs in parallel such that we can issue method requests for
     // peer discovery.

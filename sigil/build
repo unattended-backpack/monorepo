@@ -1,0 +1,115 @@
+#!/bin/bash
+# This build script generates a binary using an local crate overrides
+# before building a local docker image.
+
+# Exit immediately upon error.
+set -e
+
+# Confirm that we have a named Rust package to try building.
+if [ ! -f "Cargo.toml" ]; then
+  echo "Error: Cargo.toml not found in the current directory."
+  exit 1
+fi
+
+# Extract the package name from Cargo.toml.
+PACKAGE_NAME=$(grep -m 1 'name\s*=' Cargo.toml | sed -E 's/name\s*=\s*"(.*)"/\1/')
+
+# Check if PACKAGE_NAME is empty
+if [ -z "$PACKAGE_NAME" ]; then
+    echo "Error: Could not find package name in Cargo.toml."
+    exit 1
+fi
+
+# This build file will build using custom remote dependency forks unless
+# specified local options are available, in which case the local is used.
+./build_binary
+
+# Copy any present local-overrides to a temporary folder included in Docker. 
+rm -rf ".temp_local_overrides"
+if [ ! -f ".env.build" ]; then
+  echo "Error: .env.build file not found."
+  exit 1
+fi
+set -a
+source .env.build
+set +a
+while IFS= read -r MAPPING; do
+  [ -z "$MAPPING" ] && continue
+
+  # Retrieve the crate's name and local path.
+  IFS=';' read -ra DEP_INFO <<< "$MAPPING"
+  CRATE_NAME="${DEP_INFO[0]}"
+  LOCAL_PATH="${DEP_INFO[1]}"
+  EXCLUDES="${DEP_INFO[3]}"
+
+  # The local dependency is present; use it.
+  if [ -d "$LOCAL_PATH" ]; then
+    echo "-> moving local $CRATE_NAME at $LOCAL_PATH to Docker ..."
+
+    # Validate that we are working with a relative path.
+    if [[ "$LOCAL_PATH" = /* ]]; then
+      echo "Error: Absolute paths are not allowed."
+      exit 1
+    fi
+    if [[ "$LOCAL_PATH" = ~* ]]; then
+      echo "Error: Paths starting with '~' are not allowed."
+      exit 1
+    fi
+
+    # Preserve the relative path in the temporary folder.
+    LOCAL_PATH="${LOCAL_PATH%/}"
+    RELATIVE_PATH="$LOCAL_PATH"
+    LEADING=""
+    while [[ "$RELATIVE_PATH" == ../* ]]; do
+      LEADING+="../"
+      RELATIVE_PATH="${RELATIVE_PATH#../}"
+    done
+    if [ -z "$RELATIVE_PATH" ]; then
+      echo "Error: Relative path is empty after removing '../' components."
+      exit 1
+    fi
+
+    # Copy the entire top-level local override to the temporary folder.
+    IFS='/' read -r TOP remnant <<< "$RELATIVE_PATH"
+    if [ -z "$TOP" ]; then
+      echo "Error: Unable to determine the top-level override."
+      exit 1
+    fi
+    TOP_PATH="${LEADING}${TOP}"
+    if [ ! -d "$TOP_PATH" ]; then
+      echo "Error: Top-level directory '$TOP_PATH' does not exist."
+      exit 1
+    fi
+    DESTINATION_PATH=".temp_local_overrides/$TOP"
+    mkdir -p $DESTINATION_PATH
+
+    # Build a find command to handle any exclusions.
+    IFS=',' read -ra EXCLUDE_ARRAY <<< "$EXCLUDES"
+    FIND_EXCLUDES=()
+    for EXCLUDED in "${EXCLUDE_ARRAY[@]}"; do
+      EXCLUDED="$(echo -e "${EXCLUDED}" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')"
+      if [ -n "$EXCLUDED" ]; then
+        FIND_EXCLUDES+=("-path" "$TOP_PATH/$EXCLUDED" "-prune" "-o")
+      fi
+    done
+    FIND_CMD=(find "$TOP_PATH")
+    if [ "${#FIND_EXCLUDES[@]}" -gt 0 ]; then
+      FIND_CMD+=("${FIND_EXCLUDES[@]}")
+    fi
+    FIND_CMD+=("-print")
+
+    # Copy only files that have been found.
+    "${FIND_CMD[@]}" | while read -r ITEM_PATH; do
+      if [ "$ITEM_PATH" = "$TOP_PATH" ]; then
+        continue
+      fi
+      SHARED=$(basename $DESTINATION_PATH)
+      ITEM_NAME=$(echo "$ITEM_PATH" | sed "s|.*$SHARED/||")
+      mkdir -p "$(dirname "$DESTINATION_PATH/$ITEM_NAME")"
+      cp -r "$ITEM_PATH" "${DESTINATION_PATH}/${ITEM_NAME}"
+    done
+  fi
+done <<< "$OVERRIDES"
+
+# Then we will build a local Docker image.
+docker build -t "$PACKAGE_NAME:dev" .

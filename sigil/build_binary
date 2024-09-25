@@ -2,10 +2,14 @@
 # This build file will build using custom remote dependency forks unless
 # specified local options are available, in which case the local is used.
 
-# Specify the local overrides for custom remote dependencies.
-OVERRIDES="
-libp2p;../../rust-libp2p/libp2p/;https://github.com/unattended-backpack/rust-libp2p.git
-"
+# Read the local overrides for custom remote dependencies.
+if [ ! -f ".env.build" ]; then
+  echo "Error: .env.build file not found"
+  exit 1
+fi
+set -a
+source .env.build
+set +a
 
 # Set a build flag, cleared however this script exits.
 function reset {
@@ -31,17 +35,29 @@ while IFS= read -r MAPPING; do
 
   # The local dependency is present; use it.
   if [ -d "$LOCAL_PATH" ]; then
+    echo "-> using local $CRATE_NAME at $LOCAL_PATH ..."
+
+    # Validate that we are working with a relative path.
+    if [[ "$LOCAL_PATH" = /* ]]; then
+      echo "Error: Absolute paths are not allowed."
+      exit 1
+    fi
+    if [[ "$LOCAL_PATH" = ~* ]]; then
+      echo "Error: Paths starting with '~' are not allowed."
+      exit 1
+    fi
+
+    # Build our dynamic patch file.
     CONFIG_TOML_CONTENT+="
 [patch.\"$REMOTE_GIT_URL\"]
 $CRATE_NAME = { path = \"$LOCAL_PATH\" }
 "
-    echo "-> using local $CRATE_NAME at $LOCAL_PATH ..."
-  
+
   # The local dependency is not present; use the updated remote.
   else
     echo "-> local $CRATE_NAME not found: using updated remote ..."
-    cargo clean -p $CRATE_NAME
-    cargo update -p $CRATE_NAME
+    cargo clean -p "$CRATE_NAME"
+    cargo update -p "$CRATE_NAME"
   fi
 done <<< "$OVERRIDES"
 
@@ -50,5 +66,6 @@ if [ -n "$CONFIG_TOML_CONTENT" ]; then
   echo "$CONFIG_TOML_CONTENT" > ".cargo/config.toml"
 fi
 
-# Finally, perform the build.
-cargo build
+# Perform the build.
+cargo build "$@"
+
