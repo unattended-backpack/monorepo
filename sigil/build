@@ -22,7 +22,7 @@ fi
 
 # This build file will build using custom remote dependency forks unless
 # specified local options are available, in which case the local is used.
-./build_binary
+./build_binary "$@"
 
 # Copy any present local-overrides to a temporary folder included in Docker. 
 rm -rf ".temp_local_overrides"

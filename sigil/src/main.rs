@@ -48,7 +48,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
     // TODO: clap/tracing/various env stuff
 
     // Start an RPC server.
-    let server = ServerBuilder::default().build("127.0.0.1:3030").await?;
+    let server = ServerBuilder::default().build("0.0.0.0:3030").await?;
     let mut module = RpcModule::new(());
     module.merge(MyApiImpl.into_rpc())?;
     let handle = server.start(module);
@@ -187,7 +187,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
                     println!("Identified Peer: {}, AgentVersion: {}", peer_id, info.agent_version);
                     // TODO: Add some rules about peer rejection based on semver plus environment
                     // overrides.
-                    if !info.agent_version.contains("vigil/1.") {
+                    if !info.agent_version.contains("sigil/1.") {
                         // If the AgentVersion indicates an IPFS client, ignore or disconnect
                         println!("rejecting client: {}", peer_id);
                         swarm.disconnect_peer_id(peer_id).unwrap_or_else(|err| {

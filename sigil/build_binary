@@ -2,6 +2,9 @@
 # This build file will build using custom remote dependency forks unless
 # specified local options are available, in which case the local is used.
 
+# Exit immediately upon error.
+set -e
+
 # Read the local overrides for custom remote dependencies.
 if [ ! -f ".env.build" ]; then
   echo "Error: .env.build file not found"
@@ -65,6 +68,9 @@ done <<< "$OVERRIDES"
 if [ -n "$CONFIG_TOML_CONTENT" ]; then
   echo "$CONFIG_TOML_CONTENT" > ".cargo/config.toml"
 fi
+
+# Check the tests.
+cargo build --tests
 
 # Perform the build.
 cargo build "$@"
