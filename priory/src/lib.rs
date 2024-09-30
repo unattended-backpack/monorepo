@@ -27,7 +27,7 @@ use tokio::{
 use tracing::warn;
 
 mod config;
-use config::Config;
+pub use config::Config;
 
 mod bootstrap;
 use bootstrap::BootstrapEvent;
@@ -41,6 +41,7 @@ use holepuncher::HolepunchEvent;
 mod swarm_client;
 use swarm_client::{SwarmClient, SwarmCommand};
 
+const MDNS_AGENT_STRING: &str = "sigil/1.0.0";
 const IDENTIFY_PROTOCOL_VERSION: &str = "TODO/0.0.1";
 pub const GOSSIPSUB_TOPIC: &str = "test-net";
 
@@ -212,6 +213,9 @@ impl P2pNode {
             }
         });
 
+        // TODO: this is for the test in monorepo/sigil/tests.  Will probably remove later
+        println!("Sigil is alive.");
+
         Ok(())
     }
 
@@ -382,10 +386,10 @@ fn build_swarm(cfg: &Config, topic: IdentTopic) -> Result<Swarm<MyBehaviour>> {
                 gossipsub_config,
             )?;
 
-            let mdns = mdns::tokio::Behaviour::new(
-                mdns::Config::default(),
-                keypair.public().to_peer_id(),
-            )?;
+            let agent_string = MDNS_AGENT_STRING.to_string();
+            let mdns_string = agent_string.replace(['/', '.'], "_");
+            let mdns_config = mdns::Config::default().set_name(&mdns_string)?;
+            let mdns = mdns::tokio::Behaviour::new(mdns_config, keypair.public().to_peer_id())?;
 
             let relay_client = relay_behaviour;
 
