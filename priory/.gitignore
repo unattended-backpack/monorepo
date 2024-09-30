@@ -1,5 +1,4 @@
 .cargo/
 .temp_local_overrides/
 target/
-sigil.toml
-
+priory.toml
