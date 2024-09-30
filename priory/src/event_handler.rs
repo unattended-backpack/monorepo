@@ -8,11 +8,10 @@ use libp2p::{
     core::{multiaddr::Protocol, ConnectedPoint, PeerId},
     gossipsub::{self, IdentTopic, Message},
     identify,
-    kad::{self, BootstrapError},
+    kad::{self, BootstrapError, BootstrapOk},
     mdns,
     swarm::SwarmEvent,
 };
-use libp2p_kad::BootstrapOk;
 use std::collections::HashSet;
 use tokio::sync::mpsc::Sender;
 use tracing::{info, warn};
@@ -246,7 +245,7 @@ pub async fn handle_common_event(
             kad::QueryResult::StartProviding(Err(err)) => {
                 eprintln!("Failed to put provider record: {err:?}");
             }
-            kad::QueryResult::Bootstrap(Ok(BootstrapOk { .. })) => {}
+            kad::QueryResult::Bootstrap(Ok(BootstrapOk { .. })) => (),
             kad::QueryResult::Bootstrap(Err(BootstrapError::Timeout { peer, .. })) => {
                 // if we failed to bootstrap to a node, it is most likely behind a firewall.  Hole
                 // punch to it

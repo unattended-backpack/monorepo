@@ -4,10 +4,7 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-tokio = { version = "1.40.0", features = ["full"] }
-async-trait = "0.1.82"
-futures = "0.3.30"
-libp2p = { version = "0.54.1", features = [
+libp2p = { git = "https://github.com/unattended-backpack/rust-libp2p.git", branch = "patch/v1", features = [
 	"tokio",
 	"gossipsub",
 	"mdns",
@@ -26,6 +23,14 @@ libp2p = { version = "0.54.1", features = [
 	"serde",
 ] }
 
+libp2p-gossipsub = { version = "0.47.0" }
+libp2p-kad = { version = "0.46.2" }
+libp2p-identity = { version = "0.2.8" }
+libp2p-quic = { version = "0.10.2" }
+
+tokio = { version = "1.40.0", features = ["full"] }
+async-trait = "0.1.82"
+futures = "0.3.30"
 futures-timer = "3.0"
 tracing = "0.1.40"
 tracing-subscriber = { version = "0.3.18", features = ["env-filter"] }
@@ -33,9 +38,3 @@ anyhow = "1.0.88"
 fastrand = "2.1.1"
 serde = { version = "1.0.210", features = ["derive"] }
 toml = "0.8.19"
-
-[dependencies.libp2p-gossipsub]
-version = "0.47.0"
-
-[dependencies.libp2p-kad]
-version = "0.46.2"

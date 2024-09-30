@@ -1,14 +1,16 @@
 use anyhow::Result;
-use futures::{executor::block_on, future::FutureExt, stream::StreamExt};
+use futures::{executor::block_on, future::FutureExt, StreamExt};
 use libp2p::{
-    dcutr, gossipsub, identify, identity, kad, mdns,
+    dcutr,
+    gossipsub::{self, IdentTopic},
+    identify, identity, kad,
+    kad::store::MemoryStore,
+    mdns,
     multiaddr::{Multiaddr, Protocol},
     noise, relay,
     swarm::{behaviour::toggle::Toggle, NetworkBehaviour, SwarmEvent},
     tcp, yamux, PeerId, Swarm,
 };
-use libp2p_gossipsub::IdentTopic;
-use libp2p_kad::store::MemoryStore;
 use serde::Deserialize;
 use std::hash::{Hash, Hasher};
 use std::{
