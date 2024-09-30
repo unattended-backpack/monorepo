@@ -1,0 +1,11 @@
+port = 0
+is_relay = true
+secret_key_seed = 1
+peers = [
+	{ multiaddr = "/ip4/142.93.53.125/tcp/4001", peer_id = "12D3KooWDpJ7As7BWAwRMfu1VU2WCqNjvq387JEYKDBj4kx6nXTN" },
+]
+
+[num_gossipsub_connections]
+target_num = 7
+lower_tolerance = 2
+upper_tolerance = 5
