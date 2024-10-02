@@ -1,4 +1,4 @@
-use anyhow::Result;
+use anyhow::{Context, Result};
 use libp2p::{
     core::multiaddr::Multiaddr,
     gossipsub::{IdentTopic, TopicHash},
@@ -8,7 +8,7 @@ use tokio::sync::{mpsc::Sender, oneshot};
 
 use crate::Peer;
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct SwarmClient {
     gossipsub_topic: IdentTopic,
     command_sender: Sender<SwarmCommand>,
@@ -29,16 +29,14 @@ impl SwarmClient {
                 data: data.into(),
             })
             .await
-            .unwrap();
-        Ok(())
+            .context("send command gossipsub publish {data}")
     }
 
     pub async fn dial(&self, multiaddr: Multiaddr) -> Result<()> {
         self.command_sender
             .send(SwarmCommand::Dial { multiaddr })
             .await
-            .unwrap();
-        Ok(())
+            .context("send command dial {multiaddr}")
     }
 
     pub async fn my_relays(&self) -> Result<HashSet<Peer>> {
@@ -46,14 +44,13 @@ impl SwarmClient {
         self.command_sender
             .send(SwarmCommand::MyRelays { sender })
             .await
-            .unwrap();
+            .context("send command my_relays")?;
 
-        let my_relays = receiver.await.unwrap();
-
-        Ok(my_relays)
+        receiver.await.context("receive my_relays")
     }
 }
 
+#[derive(Debug)]
 pub enum SwarmCommand {
     // Gossipsub commands
     GossipsubPublish {
