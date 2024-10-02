@@ -3009,7 +3009,6 @@ dependencies = [
 [[package]]
 name = "priory"
 version = "0.1.0"
-source = "git+https://github.com/JossDuff/monorepo.git?branch=dev#51d4d4c0633b8feea194e9c168a3130b655daa93"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -4876,7 +4875,3 @@ dependencies = [
  "quote",
  "syn 2.0.77",
 ]
-
-[[patch.unused]]
-name = "priory"
-version = "0.1.0"

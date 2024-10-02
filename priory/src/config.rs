@@ -1,5 +1,5 @@
 use crate::Peer;
-use anyhow::Result;
+use anyhow::{Context, Result};
 use serde::Deserialize;
 use std::fs;
 
@@ -123,8 +123,10 @@ fn default_gossipsub_connections_upper_tolerance() -> usize {
 
 impl Config {
     pub fn parse(config_file_path: &str) -> Result<Self> {
-        let config_content = fs::read_to_string(config_file_path)?;
-        let config: Config = toml::from_str(&config_content)?;
+        let config_content = fs::read_to_string(config_file_path)
+            .context("read config file {config_file_path} to string")?;
+        let config: Config = toml::from_str(&config_content)
+            .context("deserialize config file {config_file_path} from toml")?;
         Ok(config)
     }
 }

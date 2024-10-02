@@ -3,7 +3,7 @@ use crate::holepuncher::HolepunchEvent;
 use crate::{
     find_ipv4, MyBehaviourEvent, P2pNode, Peer, I_HAVE_RELAYS_PREFIX, WANT_RELAY_FOR_PREFIX,
 };
-use anyhow::Result;
+use anyhow::{Context, Result};
 use libp2p::{
     core::{multiaddr::Protocol, ConnectedPoint, PeerId},
     gossipsub::{self, IdentTopic, Message},
@@ -14,10 +14,11 @@ use libp2p::{
 };
 use std::collections::HashSet;
 use tokio::sync::mpsc::Sender;
-use tracing::{info, warn};
+use tracing::{debug, info, instrument, trace, warn};
 
 const RELAY_SERVER_PROTOCOL_ID: &str = "/libp2p/circuit/relay/0.2.0/hop";
 
+#[instrument(level = "debug", skip_all)]
 pub async fn handle_swarm_event(
     p2p_node: &mut P2pNode,
     event: SwarmEvent<MyBehaviourEvent>,
@@ -29,19 +30,22 @@ pub async fn handle_swarm_event(
     if !bootstrap_event_sender.is_closed() {
         // if it's a bootstrap event, send the relevant info to the bootstrap thread
         if let Some(bootstrap_event) = BootstrapEvent::try_from_swarm_event(&event) {
-            bootstrap_event_sender.send(bootstrap_event).await.unwrap();
+            trace!(?bootstrap_event, "sending event to bootstrap");
+            bootstrap_event_sender.send(bootstrap_event).await?;
         }
     }
 
     // if it's an event that holepuncher cares about, send the relevant info to the holepuncher
     // thread
     if let Some(holepunch_event) = HolepunchEvent::try_from_swarm_event(&event) {
-        holepunch_event_sender.send(holepunch_event).await.unwrap();
+        trace!(?holepunch_event, "sending event to holepuncher");
+        holepunch_event_sender.send(holepunch_event).await?;
     }
 
     handle_common_event(p2p_node, event, holepunch_req_sender).await
 }
 
+#[instrument(skip_all)]
 pub async fn handle_common_event(
     p2p_node: &mut P2pNode,
     event: SwarmEvent<MyBehaviourEvent>,
@@ -114,7 +118,7 @@ pub async fn handle_common_event(
             peer_id,
             ..
         })) => {
-            tracing::info!(address=%observed_addr, "Received identify info from a peer");
+            tracing::info!(%peer_id, "Received identify info from a peer");
             // TODO: if we only ever receive this event from peers we're connected to, we can
             // listen to nodes who claim to be relays
             for protocol in protocols {
@@ -132,7 +136,14 @@ pub async fn handle_common_event(
                             .clone()
                             .with(Protocol::P2p(peer_id))
                             .with(Protocol::P2pCircuit);
-                        p2p_node.swarm.listen_on(circuit_multiaddr.clone()).unwrap();
+                        debug!(
+                            %circuit_multiaddr,
+                            "peer is relay.  Listening on circuit address"
+                        );
+                        p2p_node
+                            .swarm
+                            .listen_on(circuit_multiaddr.clone())
+                            .context("listen on {circuit_multiaddr}")?;
 
                         // non-circuit multiaddr to advertise to others
                         p2p_node.add_relay(Peer {
@@ -167,18 +178,22 @@ pub async fn handle_common_event(
 
                 // Dial this known peer so the logic in Identify is executed (add to kademlia,
                 // holepunch, etc)
-                p2p_node.swarm.dial(peer_id).unwrap();
+                p2p_node.swarm.dial(peer_id).context("dial {peer_id}")?;
             }
         }
         SwarmEvent::Behaviour(MyBehaviourEvent::Mdns(mdns::Event::Expired(list))) => {
-            for (peer_id, _multiaddr) in list {
+            for (peer_id, multiaddr) in list {
                 // println!("mDNS discovered peer has expired: {peer_id}");
                 p2p_node
                     .swarm
                     .behaviour_mut()
                     .gossipsub
                     .remove_explicit_peer(&peer_id);
-                // swarm.behaviour_mut().kademlia.remove_address(&peer_id, &multiaddr);
+                p2p_node
+                    .swarm
+                    .behaviour_mut()
+                    .kademlia
+                    .remove_address(&peer_id, &multiaddr);
             }
         }
         SwarmEvent::Behaviour(MyBehaviourEvent::Gossipsub(gossipsub::Event::Message {
@@ -258,10 +273,9 @@ pub async fn handle_common_event(
 
         SwarmEvent::Behaviour(MyBehaviourEvent::Kademlia(kad::Event::RoutingUpdated {
             peer,
-            addresses,
             ..
         })) => {
-            info!( peer=%peer, addresses=?addresses, "KAD routing table updated");
+            info!(%peer, "KAD routing table updated");
         }
         _ => (),
     };

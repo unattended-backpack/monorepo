@@ -1,4 +1,4 @@
-use anyhow::{Context, Result};
+use anyhow::{anyhow, Context, Result};
 use libp2p::{
     core::{
         multiaddr::{Multiaddr, Protocol},
@@ -10,17 +10,20 @@ use libp2p::{
 };
 use std::collections::{HashMap, HashSet};
 use tokio::sync::mpsc::Receiver;
-use tracing::info;
+use tracing::{debug, info, instrument, trace, warn};
 
 use crate::swarm_client::SwarmClient;
 use crate::{find_ipv4, MyBehaviourEvent, Peer, I_HAVE_RELAYS_PREFIX, WANT_RELAY_FOR_PREFIX};
 
+#[derive(Debug)]
 pub enum HolepunchEvent {
     GossipsubMessage { message: Message },
     IdentifySent,
     IdentifyReceived,
     DcutrConnectionSuccessful { remote_peer_id: PeerId },
     DcutrConnectionFailed { remote_peer_id: PeerId },
+    ConnectionEstablished,
+    OutgoingConnectionError,
 }
 
 impl HolepunchEvent {
@@ -45,6 +48,10 @@ impl HolepunchEvent {
                     Err(_) => Some(HolepunchEvent::DcutrConnectionFailed { remote_peer_id }),
                 }
             }
+            SwarmEvent::ConnectionEstablished { .. } => Some(HolepunchEvent::ConnectionEstablished),
+            SwarmEvent::OutgoingConnectionError { .. } => {
+                Some(HolepunchEvent::OutgoingConnectionError)
+            }
             _ => None,
         }
     }
@@ -60,23 +67,27 @@ pub async fn watch_for_holepunch_request(
         let holepunch_target = receiver
             .recv()
             .await
-            .context("hole punch request sender shouldn't drop")
-            .unwrap();
+            .context("hole punch request sender shouldn't drop")?;
 
         // try to hole punch
         // TODO: do we need to block or anything fancy?  We just want to attempt one hole punch at
         // a time
-        holepunch(holepunch_target, event_receiver, &swarm_client).await?;
+        holepunch(holepunch_target, event_receiver, &swarm_client)
+            .await
+            .context("holepunch for {holepunch_target}")?;
     }
 }
 
+#[instrument(skip(event_receiver, swarm_client))]
 pub async fn holepunch(
     target_peer_id: PeerId,
     event_receiver: &mut Receiver<HolepunchEvent>,
     swarm_client: &SwarmClient,
 ) -> Result<()> {
+    info!("initiating holepunch");
+
     let query = format!("{WANT_RELAY_FOR_PREFIX}{target_peer_id}");
-    swarm_client.gossipsub_publish(query).await.unwrap();
+    swarm_client.gossipsub_publish(query).await?;
 
     // Wait until we hear a response from a relay claiming they know this target_peer_id (or timeout)
     let mut possible_relays: Vec<Multiaddr> = Vec::new();
@@ -85,28 +96,30 @@ pub async fn holepunch(
         if let HolepunchEvent::GossipsubMessage { message, .. } = event_receiver
             .recv()
             .await
-            .context("event sender shouldn't drop")
-            .unwrap()
+            .context("holepunch event sender shouldn't drop")?
         {
             let message = String::from_utf8_lossy(&message.data);
             // should respond with {prefix}{target_target_peer_id} {relay_multiaddr}
             if let Some(str) = message.strip_prefix(I_HAVE_RELAYS_PREFIX) {
                 let str: Vec<&str> = str.split(" ").collect();
-                assert!(
-                    !str.is_empty(),
-                    "must return at least its own target_peer_id"
-                );
 
                 // peer doesn't have any relays or isn't willing to share
-                if str.len() == 1 {
-                    break;
+                // TODO: == 1 or <= 1??
+                if str.len() <= 1 {
+                    warn!("Hole punch target responded with 0 relay addresses.  Holepunch unsuccessful.",);
+                    return Ok(());
                 }
 
-                let target_target_peer_id: PeerId = str[0].parse().unwrap();
+                // TODO: how to ensure the message came from the target peer?
+                let responded_peer_id: PeerId = str
+                    .first()
+                    .context("get the responded peer id")?
+                    .parse()
+                    .context("parse responsded peer id into PeerId")?;
 
                 // if the message is about the peer we care about, break and try to dial that
                 // multiaddr
-                if target_target_peer_id == target_peer_id {
+                if responded_peer_id == target_peer_id {
                     // add all the relays to the list
                     for multiaddr_str in str.iter().skip(1) {
                         // skip localhost addrs
@@ -114,22 +127,46 @@ pub async fn holepunch(
                             continue;
                         }
 
-                        possible_relays.push(multiaddr_str.parse().unwrap());
+                        possible_relays.push(
+                            multiaddr_str
+                                .parse()
+                                .context("parse relay addr str as Multiaddr")?,
+                        );
                     }
-                    info!("Found relays for peer {}", target_peer_id);
+                    info!("Peer responded with its relays");
+                    debug!(?possible_relays);
                     break;
                 }
             }
         }
     }
 
-    let my_relays = swarm_client.my_relays().await.unwrap();
+    let my_relays = swarm_client.my_relays().await?;
+    trace!(?my_relays);
 
     // first check if we already are connected to any of these relays
     let (common_relays, possible_relays) = compare_relay_lists(my_relays, possible_relays);
+    debug!(
+        "Have {} relays in common with the holepunch target",
+        common_relays.len()
+    );
+    trace!(?common_relays);
+    trace!(?possible_relays);
 
     for relay in common_relays {
-        let relay_address_with_target_peer_id = relay.multiaddr.with_p2p(relay.peer_id).unwrap();
+        debug!(?relay, "Using common relay for holepunch");
+
+        let relay_address_with_target_peer_id =
+            if let Ok(multiaddr) = relay.clone().multiaddr.with_p2p(relay.peer_id) {
+                multiaddr
+            } else {
+                return Err(anyhow!(
+                    "Couldn't add peer_id {} onto the end of multiaddr {}",
+                    relay.peer_id,
+                    relay.multiaddr
+                ));
+            };
+
         // attempt to holepunch with one of the relays we know
         if exec_holepunch(
             relay_address_with_target_peer_id.clone(),
@@ -137,22 +174,39 @@ pub async fn holepunch(
             event_receiver,
             swarm_client,
         )
-        .await
-        .unwrap()
+        .await?
         {
-            info!("\nHOLEPUNCH SUCCESSFUL\n");
             return Ok(());
         }
     }
 
-    // TODO: we should only attempt to dial the non-common relays
     for relay_address in possible_relays {
-        // attempt to holepunch to the target peer with the relay we just connected to
-        if exec_holepunch(relay_address, target_peer_id, event_receiver, swarm_client)
+        debug!(relay=%relay_address, "Dialing possible relay for holepunch target");
+        swarm_client
+            .dial(relay_address.clone())
             .await
-            .unwrap()
-        {
-            info!("\nHOLEPUNCH SUCCESSFUL\n");
+            .context(format!(
+                "Dial possible relay {} for holepunching to target peer {}",
+                relay_address, target_peer_id,
+            ))?;
+
+        // wait until we make or don't make connection
+        loop {
+            match event_receiver
+                .recv()
+                .await
+                .context("holepunch event receiver shouldn't drop")?
+            {
+                HolepunchEvent::ConnectionEstablished | HolepunchEvent::OutgoingConnectionError => {
+                    // TODO: how to ensure if this peer_id is the relays peer_id?
+                    break;
+                }
+                _ => continue,
+            }
+        }
+
+        // attempt to holepunch to the target peer with the relay we just connected to
+        if exec_holepunch(relay_address, target_peer_id, event_receiver, swarm_client).await? {
             break;
         }
     }
@@ -160,39 +214,49 @@ pub async fn holepunch(
     Ok(())
 }
 
+#[instrument(skip(event_receiver, swarm_client))]
 async fn exec_holepunch(
-    relay_address: Multiaddr,
+    relay_addr: Multiaddr,
     target_peer_id: PeerId,
     event_receiver: &mut Receiver<HolepunchEvent>,
     swarm_client: &SwarmClient,
 ) -> Result<bool> {
     // attempt to hole punch to the node we failed to dial earlier
-    let multiaddr = relay_address
+    let multiaddr = if let Ok(multiaddr) = relay_addr
+        .clone()
         .with(Protocol::P2pCircuit)
         .with_p2p(target_peer_id)
-        .unwrap();
-    swarm_client.dial(multiaddr).await.unwrap();
+    {
+        multiaddr
+    } else {
+        return Err(anyhow!(
+            "Couldn't add peer_id {} onto the end of multiaddr {}",
+            target_peer_id,
+            relay_addr
+        ));
+    };
 
-    info!(peer = ?target_peer_id, "Attempting to hole punch");
+    info!("Attempting to holepunch");
+    swarm_client.dial(multiaddr).await?;
 
     // TODO: add a timeout
     loop {
         match event_receiver
             .recv()
             .await
-            .context("event sender shouldn't drop")
-            .unwrap()
+            .context("event sender shouldn't drop")?
         {
             // dcutr events.  If its successful break out of the for loop, if its a failure
             // break out of this loop
             HolepunchEvent::DcutrConnectionSuccessful { remote_peer_id } => {
                 if remote_peer_id == target_peer_id {
+                    info!("Holepunch successful");
                     return Ok(true);
                 }
             }
             HolepunchEvent::DcutrConnectionFailed { remote_peer_id } => {
                 if remote_peer_id == target_peer_id {
-                    // holepunch unsuccessful
+                    warn!("Holepunch unsuccessful");
                     return Ok(false);
                 }
             }

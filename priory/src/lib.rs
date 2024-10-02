@@ -1,4 +1,17 @@
-use anyhow::Result;
+/*
+
+TODO:
+
+[] directly dialing people on dns (/dns/<address> in rust-libp2p/examples/ipfs-kad)
+[] remove asserts, panics, and unwraps
+[] all levels of error handling
+[] all levels of tracing logs.  Re-read zero-to-prod logging approach
+[] auto bootstrap when it hits a certain low threshold or receives some error (not enough peers, etc)
+[] proper error handling, not just bubbling up anyhow!()
+
+*/
+
+use anyhow::{Context, Result};
 use futures::{executor::block_on, future::FutureExt, StreamExt};
 use libp2p::{
     dcutr,
@@ -12,9 +25,9 @@ use libp2p::{
     tcp, yamux, PeerId, Swarm,
 };
 use serde::Deserialize;
-use std::hash::{Hash, Hasher};
 use std::{
     collections::{hash_map::DefaultHasher, HashSet},
+    hash::{Hash, Hasher},
     net::Ipv4Addr,
 };
 use tokio::{
@@ -24,7 +37,7 @@ use tokio::{
     sync::mpsc::{self, Receiver, Sender},
     time::Duration,
 };
-use tracing::warn;
+use tracing::{debug, instrument, trace, warn};
 
 mod config;
 pub use config::Config;
@@ -86,6 +99,8 @@ impl P2pNode {
         let swarm = build_swarm(&cfg, topic.clone())?;
         let relays = HashSet::new();
 
+        trace!("P2pNode created");
+
         Ok(Self {
             swarm,
             topic,
@@ -96,7 +111,9 @@ impl P2pNode {
 
     pub async fn run(&mut self) -> Result<()> {
         // start listening
-        self.listen_on_addrs().await.unwrap();
+        self.listen_on_addrs()
+            .await
+            .context("listen on all addrs")?;
 
         // TODO: how big should the channels be?
         let (swarm_command_sender, mut swarm_command_receiver) = mpsc::channel(16);
@@ -107,32 +124,36 @@ impl P2pNode {
         let swarm_client = SwarmClient::new(swarm_command_sender, self.topic.clone());
 
         // start concurrent process to dial all nodes in the config
+        trace!("starting initial bootstrap");
         Self::bootstrap(
             self.cfg.clone(),
             bootstrap_event_receiver,
             holepunch_req_sender.clone(),
             swarm_client.clone(),
         )
-        .unwrap();
+        .context("initial bootstrap")?;
 
         // start concurrent process to handle requests to hole punch
+        trace!("starting to watch for holepunch requests");
         Self::watch_for_holepunch_request(
             swarm_client,
             holepunch_req_receiver,
             holepunch_event_receiver,
         )
-        .unwrap();
+        .context("watching for holepunch requests")?;
 
         // read full lines from stdin
+        trace!("reading liens from stdin");
         let mut stdin = io::BufReader::new(io::stdin()).lines();
 
         // let it rip
+        debug!("setup done, entering main event loop");
         loop {
             select! {
-                Some(command) = swarm_command_receiver.recv() => self.exec_swarm_command(command).unwrap(),
-                event = self.swarm.select_next_some() => handle_swarm_event(self, event, &bootstrap_event_sender, &holepunch_event_sender, &holepunch_req_sender).await.unwrap(),
+                Some(command) = swarm_command_receiver.recv() => self.exec_swarm_command(command).context("exec swarm command {command}")?,
+                event = self.swarm.select_next_some() => handle_swarm_event(self, event, &bootstrap_event_sender, &holepunch_event_sender, &holepunch_req_sender).await.context("handle swarm event")?,
                 // Writing & line stuff is just for debugging & dev
-                Ok(Some(line)) = stdin.next_line() => handle_input_line(self, line).unwrap(),
+                Ok(Some(line)) = stdin.next_line() => handle_input_line(self, line).context("handle input line")?,
             };
         }
     }
@@ -175,13 +196,19 @@ impl P2pNode {
         let listen_addr_tcp = Multiaddr::empty()
             .with(Protocol::from(Ipv4Addr::UNSPECIFIED))
             .with(Protocol::Tcp(self.cfg.port));
-        self.swarm.listen_on(listen_addr_tcp.clone()).unwrap();
+        self.swarm
+            .listen_on(listen_addr_tcp.clone())
+            .context("Listen on tcp addr {:?listen_addr_tcp}")?;
+        debug!(%listen_addr_tcp, "listening on tcp address");
 
         let listen_addr_quic = Multiaddr::empty()
             .with(Protocol::from(Ipv4Addr::UNSPECIFIED))
             .with(Protocol::Udp(self.cfg.port))
             .with(Protocol::QuicV1);
-        self.swarm.listen_on(listen_addr_quic.clone()).unwrap();
+        self.swarm
+            .listen_on(listen_addr_quic.clone())
+            .context("Listen on quic addr {listen_addr_quic}")?;
+        debug!(%listen_addr_quic, "listening on quic address");
 
         block_on(async {
             let mut delay = futures_timer::Delay::new(std::time::Duration::from_secs(1)).fuse();
@@ -202,7 +229,7 @@ impl P2pNode {
                                     break;
                                 }
                             }
-                            event => panic!("{event:?}"),
+                            _ => continue,
                         }
                     }
                     _ = delay => {
@@ -220,14 +247,17 @@ impl P2pNode {
     }
 
     pub fn add_relay(&mut self, relay: Peer) {
+        trace!(?relay, "adding connected relay");
         self.relays.insert(relay);
     }
 
+    #[instrument(skip_all, level = "debug")]
     fn exec_swarm_command(self: &mut P2pNode, command: SwarmCommand) -> Result<()> {
         let swarm = &mut self.swarm;
         match command {
             // Gossipsub commands
             SwarmCommand::GossipsubPublish { topic, data } => {
+                debug!(?data, "gossipsub publish");
                 swarm
                     .behaviour_mut()
                     .gossipsub
@@ -236,10 +266,12 @@ impl P2pNode {
             }
             // Swarm commands
             SwarmCommand::Dial { multiaddr } => {
+                debug!(%multiaddr, "dial");
                 swarm.dial(multiaddr).unwrap();
             }
             SwarmCommand::MyRelays { sender } => {
                 let my_relays = self.relays.clone();
+                debug!(?my_relays, "my_relays");
                 sender.send(my_relays).unwrap();
             }
         };
@@ -427,7 +459,11 @@ fn build_swarm(cfg: &Config, topic: IdentTopic) -> Result<Swarm<MyBehaviour>> {
         .with_swarm_config(|c| c.with_idle_connection_timeout(Duration::from_secs(60)))
         .build();
 
-    swarm.behaviour_mut().gossipsub.subscribe(&topic).unwrap();
+    swarm
+        .behaviour_mut()
+        .gossipsub
+        .subscribe(&topic)
+        .context("subscribe to gossipsub topic {topic}")?;
     Ok(swarm)
 }
 
