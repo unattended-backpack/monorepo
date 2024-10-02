@@ -51,11 +51,8 @@ async fn main() -> Result<()> {
     // tokio::signal::ctrl_c().await?;
     // handle.stopped().await;
 
-    // create priory node
-    let mut p2p_node = P2pNode::new(cfg.priory)?;
-
-    // run priory node
-    p2p_node.run().await?;
+    // create and run priory node
+    let p2p_node_client = P2pNode::init_and_run(cfg.priory)?;
 
     Ok(())
 }

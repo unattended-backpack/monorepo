@@ -93,7 +93,13 @@ pub struct P2pNode {
 }
 
 impl P2pNode {
-    pub fn new(cfg: Config) -> Result<Self> {
+    pub fn init_and_run(cfg: Config) -> Result<SwarmClient> {
+        let p2p_node = Self::init(cfg).context("init p2p_node")?;
+
+        p2p_node.run()
+    }
+
+    fn init(cfg: Config) -> Result<Self> {
         let topic = gossipsub::IdentTopic::new(GOSSIPSUB_TOPIC);
         let swarm = build_swarm(&cfg, topic.clone())?;
         let relays = HashSet::new();
@@ -108,14 +114,32 @@ impl P2pNode {
         })
     }
 
-    pub async fn run(&mut self) -> Result<()> {
+    // consumes P2pNode to run the event loop in the background, gives a client that can send commands to the p2pNode's thread
+    fn run(mut self) -> Result<SwarmClient> {
+        let (command_sender, command_receiver) = mpsc::channel(16);
+
+        let client = SwarmClient::new(command_sender.clone(), self.topic.clone());
+
+        tokio::spawn(async move {
+            self.run_impl(command_sender, command_receiver)
+                .await
+                .unwrap();
+        });
+
+        Ok(client)
+    }
+
+    async fn run_impl(
+        &mut self,
+        swarm_command_sender: Sender<SwarmCommand>,
+        mut swarm_command_receiver: Receiver<SwarmCommand>,
+    ) -> Result<()> {
         // start listening
         self.listen_on_addrs()
             .await
             .context("listen on all addrs")?;
 
         // TODO: how big should the channels be?
-        let (swarm_command_sender, mut swarm_command_receiver) = mpsc::channel(16);
         let (bootstrap_event_sender, bootstrap_event_receiver) = mpsc::channel(16);
         let (holepunch_event_sender, holepunch_event_receiver) = mpsc::channel(16);
         let (holepunch_req_sender, holepunch_req_receiver) = mpsc::channel(16);
@@ -135,7 +159,7 @@ impl P2pNode {
         // start concurrent process to handle requests to hole punch
         trace!("starting to watch for holepunch requests");
         Self::watch_for_holepunch_request(
-            swarm_client,
+            swarm_client.clone(),
             holepunch_req_receiver,
             holepunch_event_receiver,
         )
@@ -155,48 +179,6 @@ impl P2pNode {
                 Ok(Some(line)) = stdin.next_line() => handle_input_line(self, line).context("handle input line")?,
             };
         }
-    }
-
-    /// returns PeerIds of all connected peers.  Used in testing and diagnostics
-    pub fn connected_peers(&self) -> Vec<String> {
-        self.swarm
-            .connected_peers()
-            .map(|peer_id| peer_id.to_string())
-            .collect()
-    }
-
-    /// returns PeerIds of all gossipsub mesh peers that are subscribed to this topic.  Used in
-    /// testing and diagnostics
-    pub fn gossipsub_mesh_peers(&self) -> Vec<String> {
-        let topic = self.topic.clone();
-        self.swarm
-            .behaviour()
-            .gossipsub
-            .mesh_peers(&topic.into())
-            .map(|peer_id| peer_id.to_string())
-            .collect()
-    }
-
-    /// returns a hashmap with key = <PeerId> and value = <vec of that peer's unique addresses> for all peers in the kademlia routing table.  Used in testing and diagnostics
-    pub fn kademlia_routing_table_peers(&mut self) -> HashMap<String, Vec<String>> {
-        self.swarm
-            .behaviour_mut()
-            .kademlia
-            .kbuckets()
-            .fold(HashMap::new(), |mut acc, kbucket| {
-                kbucket.iter().for_each(|entry| {
-                    let peer_id: String = entry.node.key.into_preimage().to_string();
-                    let peer_multiaddrs: Vec<String> = entry
-                        .node
-                        .value
-                        .iter()
-                        .map(|addr| addr.to_string())
-                        .collect();
-
-                    acc.insert(peer_id, peer_multiaddrs);
-                });
-                acc
-            })
     }
 
     /// returns the peer_id of the local P2pNode
@@ -300,10 +282,11 @@ impl P2pNode {
     #[instrument(skip_all, level = "debug")]
     fn exec_swarm_command(self: &mut P2pNode, command: SwarmCommand) -> Result<()> {
         let swarm = &mut self.swarm;
+        // TODO: remove upwraps
         match command {
             // Gossipsub commands
             SwarmCommand::GossipsubPublish { topic, data } => {
-                debug!(?data, "gossipsub publish");
+                debug!(?data, "GossipsubPublish");
                 swarm
                     .behaviour_mut()
                     .gossipsub
@@ -312,13 +295,45 @@ impl P2pNode {
             }
             // Swarm commands
             SwarmCommand::Dial { multiaddr } => {
-                debug!(%multiaddr, "dial");
+                debug!(%multiaddr, "Dial");
                 swarm.dial(multiaddr).unwrap();
             }
             SwarmCommand::MyRelays { sender } => {
                 let my_relays = self.relays.clone();
-                debug!(?my_relays, "my_relays");
+                debug!(?my_relays, "MyRelays");
                 sender.send(my_relays).unwrap();
+            }
+            SwarmCommand::ConnectedPeers { sender } => {
+                let connected_peers: Vec<PeerId> = swarm.connected_peers().copied().collect();
+                debug!(?connected_peers, "ConnectedPeers");
+                sender.send(connected_peers).unwrap();
+            }
+            SwarmCommand::GossipsubMeshPeers { sender } => {
+                let topic = self.topic.clone();
+                let gossipsub_mesh_peers: Vec<PeerId> = swarm
+                    .behaviour()
+                    .gossipsub
+                    .mesh_peers(&topic.into())
+                    .copied()
+                    .collect();
+                debug!(?gossipsub_mesh_peers, "GossipsubMeshPeers");
+                sender.send(gossipsub_mesh_peers).unwrap();
+            }
+            SwarmCommand::KademliaRoutingTablePeers { sender } => {
+                let kademlia_routing_table_peers = swarm.behaviour_mut().kademlia.kbuckets().fold(
+                    HashMap::new(),
+                    |mut acc, kbucket| {
+                        kbucket.iter().for_each(|entry| {
+                            let peer_id = entry.node.key.into_preimage();
+                            let peer_multiaddrs: Vec<Multiaddr> =
+                                entry.node.value.iter().cloned().collect();
+                            acc.insert(peer_id, peer_multiaddrs);
+                        });
+                        acc
+                    },
+                );
+                debug!(?kademlia_routing_table_peers, "KademliaRoutingTablePeers");
+                sender.send(kademlia_routing_table_peers).unwrap();
             }
         };
 
