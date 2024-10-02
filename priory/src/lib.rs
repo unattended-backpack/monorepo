@@ -26,13 +26,12 @@ use libp2p::{
 };
 use serde::Deserialize;
 use std::{
-    collections::{hash_map::DefaultHasher, HashSet},
+    collections::{hash_map::DefaultHasher, HashMap, HashSet},
     hash::{Hash, Hasher},
     net::Ipv4Addr,
 };
 use tokio::{
-    io,
-    io::AsyncBufReadExt,
+    io::{self, AsyncBufReadExt},
     select,
     sync::mpsc::{self, Receiver, Sender},
     time::Duration,
@@ -158,6 +157,53 @@ impl P2pNode {
         }
     }
 
+    /// returns PeerIds of all connected peers.  Used in testing and diagnostics
+    pub fn connected_peers(&self) -> Vec<String> {
+        self.swarm
+            .connected_peers()
+            .map(|peer_id| peer_id.to_string())
+            .collect()
+    }
+
+    /// returns PeerIds of all gossipsub mesh peers that are subscribed to this topic.  Used in
+    /// testing and diagnostics
+    pub fn gossipsub_mesh_peers(&self) -> Vec<String> {
+        let topic = self.topic.clone();
+        self.swarm
+            .behaviour()
+            .gossipsub
+            .mesh_peers(&topic.into())
+            .map(|peer_id| peer_id.to_string())
+            .collect()
+    }
+
+    /// returns a hashmap with key = <PeerId> and value = <vec of that peer's unique addresses> for all peers in the kademlia routing table.  Used in testing and diagnostics
+    pub fn kademlia_routing_table_peers(&mut self) -> HashMap<String, Vec<String>> {
+        self.swarm
+            .behaviour_mut()
+            .kademlia
+            .kbuckets()
+            .fold(HashMap::new(), |mut acc, kbucket| {
+                kbucket.iter().for_each(|entry| {
+                    let peer_id: String = entry.node.key.into_preimage().to_string();
+                    let peer_multiaddrs: Vec<String> = entry
+                        .node
+                        .value
+                        .iter()
+                        .map(|addr| addr.to_string())
+                        .collect();
+
+                    acc.insert(peer_id, peer_multiaddrs);
+                });
+                acc
+            })
+    }
+
+    /// returns the peer_id of the local P2pNode
+    pub fn local_peer_id(&self) -> String {
+        self.swarm.local_peer_id().to_string()
+    }
+
     fn bootstrap(
         cfg: Config,
         mut event_receiver: Receiver<BootstrapEvent>,
@@ -246,7 +292,7 @@ impl P2pNode {
         Ok(())
     }
 
-    pub fn add_relay(&mut self, relay: Peer) {
+    pub(crate) fn add_relay(&mut self, relay: Peer) {
         trace!(?relay, "adding connected relay");
         self.relays.insert(relay);
     }
@@ -278,8 +324,6 @@ impl P2pNode {
 
         Ok(())
     }
-
-    // pub fn send_message()
 }
 
 fn generate_ed25519(secret_key_seed: u8) -> identity::Keypair {
