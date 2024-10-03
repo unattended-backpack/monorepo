@@ -1,9 +1,5 @@
 use anyhow::{Context, Result};
-use libp2p::{
-    core::multiaddr::Multiaddr,
-    gossipsub::{IdentTopic, TopicHash},
-    PeerId,
-};
+use libp2p::{core::multiaddr::Multiaddr, PeerId};
 use std::collections::{HashMap, HashSet};
 use tokio::sync::{mpsc::Sender, oneshot};
 
@@ -11,24 +7,17 @@ use crate::Peer;
 
 #[derive(Clone, Debug)]
 pub struct SwarmClient {
-    gossipsub_topic: IdentTopic,
     command_sender: Sender<SwarmCommand>,
 }
 
 impl SwarmClient {
-    pub fn new(command_sender: Sender<SwarmCommand>, gossipsub_topic: IdentTopic) -> Self {
-        Self {
-            command_sender,
-            gossipsub_topic,
-        }
+    pub fn new(command_sender: Sender<SwarmCommand>) -> Self {
+        Self { command_sender }
     }
 
     pub async fn gossipsub_publish(&self, data: String) -> Result<()> {
         self.command_sender
-            .send(SwarmCommand::GossipsubPublish {
-                topic: self.gossipsub_topic.clone().into(),
-                data: data.into(),
-            })
+            .send(SwarmCommand::GossipsubPublish { data: data.into() })
             .await
             .context("send command GossipsubPublish {data}")
     }
@@ -87,7 +76,6 @@ impl SwarmClient {
 pub enum SwarmCommand {
     // publish data to the gossipsub network
     GossipsubPublish {
-        topic: TopicHash,
         data: Vec<u8>,
     },
     // dial an address

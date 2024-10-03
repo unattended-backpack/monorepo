@@ -93,10 +93,20 @@ pub struct P2pNode {
 }
 
 impl P2pNode {
-    pub fn init_and_run(cfg: Config) -> Result<SwarmClient> {
-        let p2p_node = Self::init(cfg).context("init p2p_node")?;
+    pub fn start(cfg: Config) -> Result<SwarmClient> {
+        let (command_sender, command_receiver) = mpsc::channel(16);
 
-        p2p_node.run()
+        let client = SwarmClient::new(command_sender.clone());
+
+        tokio::spawn(async move {
+            let mut p2p_node = Self::init(cfg).context("init p2p_node").unwrap();
+            p2p_node
+                .run(command_sender, command_receiver)
+                .await
+                .unwrap();
+        });
+
+        Ok(client)
     }
 
     fn init(cfg: Config) -> Result<Self> {
@@ -114,22 +124,7 @@ impl P2pNode {
         })
     }
 
-    // consumes P2pNode to run the event loop in the background, gives a client that can send commands to the p2pNode's thread
-    fn run(mut self) -> Result<SwarmClient> {
-        let (command_sender, command_receiver) = mpsc::channel(16);
-
-        let client = SwarmClient::new(command_sender.clone(), self.topic.clone());
-
-        tokio::spawn(async move {
-            self.run_impl(command_sender, command_receiver)
-                .await
-                .unwrap();
-        });
-
-        Ok(client)
-    }
-
-    async fn run_impl(
+    async fn run(
         &mut self,
         swarm_command_sender: Sender<SwarmCommand>,
         mut swarm_command_receiver: Receiver<SwarmCommand>,
@@ -144,7 +139,7 @@ impl P2pNode {
         let (holepunch_event_sender, holepunch_event_receiver) = mpsc::channel(16);
         let (holepunch_req_sender, holepunch_req_receiver) = mpsc::channel(16);
 
-        let swarm_client = SwarmClient::new(swarm_command_sender, self.topic.clone());
+        let swarm_client = SwarmClient::new(swarm_command_sender);
 
         // start concurrent process to dial all nodes in the config
         trace!("starting initial bootstrap");
@@ -285,8 +280,9 @@ impl P2pNode {
         // TODO: remove upwraps
         match command {
             // Gossipsub commands
-            SwarmCommand::GossipsubPublish { topic, data } => {
+            SwarmCommand::GossipsubPublish { data } => {
                 debug!(?data, "GossipsubPublish");
+                let topic = self.topic.clone();
                 swarm
                     .behaviour_mut()
                     .gossipsub
@@ -542,3 +538,18 @@ pub fn find_ipv4(multiaddr_str: &str) -> Option<String> {
 
     multiaddr_parts.get(ipv4_index).map(|ipv4| ipv4.to_string())
 }
+
+// #[cfg(test)]
+// mod tests {
+//
+//     use super::*;
+//
+//     #[tokio::test]
+//     async fn smoke_test_swarm() {
+//         let toml_str = r#""#;
+//         let cfg: Config = toml::from_str(toml_str).unwrap();
+//         let client = P2pNode::start(cfg).unwrap();
+//         let connected_peers = client.connected_peers().await.unwrap();
+//         assert!(connected_peers.is_empty());
+//     }
+// }
