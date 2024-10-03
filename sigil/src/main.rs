@@ -58,7 +58,7 @@ async fn main() -> Result<()> {
     println!("connected peers: {:?}", peers);
 
     // simulate doing things
-    tokio::time::sleep(Duration::from_secs(10));
+    loop {}
 
     Ok(())
 }
