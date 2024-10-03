@@ -39,7 +39,6 @@ use tokio::{
 use tracing::{debug, instrument, trace, warn};
 
 mod config;
-pub use config::Config;
 
 mod bootstrap;
 use bootstrap::BootstrapEvent;
@@ -51,7 +50,10 @@ mod holepuncher;
 use holepuncher::HolepunchEvent;
 
 mod swarm_client;
-use swarm_client::{SwarmClient, SwarmCommand};
+use swarm_client::SwarmCommand;
+
+pub use config::Config;
+pub use swarm_client::SwarmClient;
 
 const MDNS_AGENT_STRING: &str = "sigil/1.0.0";
 const IDENTIFY_PROTOCOL_VERSION: &str = "TODO/0.0.1";
