@@ -333,6 +333,10 @@ impl P2pNode {
                 debug!(?kademlia_routing_table_peers, "KademliaRoutingTablePeers");
                 sender.send(kademlia_routing_table_peers).unwrap();
             }
+            SwarmCommand::MyPeerId { sender } => {
+                let my_peer_id = swarm.local_peer_id();
+                sender.send(*my_peer_id).unwrap();
+            }
         };
 
         Ok(())

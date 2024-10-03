@@ -70,6 +70,16 @@ impl SwarmClient {
             .await
             .context("receive kademlia routing table peers")
     }
+
+    pub async fn my_peer_id(&self) -> Result<PeerId> {
+        let (sender, receiver) = oneshot::channel();
+        self.command_sender
+            .send(SwarmCommand::MyPeerId { sender })
+            .await
+            .context("send command MyPeerId")?;
+
+        receiver.await.context("receive my peer id")
+    }
 }
 
 #[derive(Debug)]
@@ -97,5 +107,9 @@ pub enum SwarmCommand {
     // shares the swarm's kademlia routing table peers
     KademliaRoutingTablePeers {
         sender: oneshot::Sender<HashMap<PeerId, Vec<Multiaddr>>>,
+    },
+    // returns the local node's PeerId
+    MyPeerId {
+        sender: oneshot::Sender<PeerId>,
     },
 }
