@@ -52,7 +52,13 @@ async fn main() -> Result<()> {
     // handle.stopped().await;
 
     // create and run priory node
-    let p2p_node_client = P2pNode::init_and_run(cfg.priory)?;
+    let p2p_node_client = P2pNode::start(cfg.priory)?;
+
+    let peers = p2p_node_client.connected_peers().await.unwrap();
+    println!("connected peers: {:?}", peers);
+
+    // simulate doing things
+    tokio::time::sleep(Duration::from_secs(10));
 
     Ok(())
 }
