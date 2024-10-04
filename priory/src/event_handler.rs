@@ -178,7 +178,7 @@ pub async fn handle_common_event(
 
                 // Dial this known peer so the logic in Identify is executed (add to kademlia,
                 // holepunch, etc)
-                p2p_node.swarm.dial(peer_id).context("dial {peer_id}")?;
+                // p2p_node.swarm.dial(peer_id).context("dial {peer_id}")?;
             }
         }
         SwarmEvent::Behaviour(MyBehaviourEvent::Mdns(mdns::Event::Expired(list))) => {

@@ -26,13 +26,12 @@ use libp2p::{
 };
 use serde::Deserialize;
 use std::{
-    collections::{hash_map::DefaultHasher, HashSet},
+    collections::{hash_map::DefaultHasher, HashMap, HashSet},
     hash::{Hash, Hasher},
     net::Ipv4Addr,
 };
 use tokio::{
-    io,
-    io::AsyncBufReadExt,
+    io::{self, AsyncBufReadExt},
     select,
     sync::mpsc::{self, Receiver, Sender},
     time::Duration,
@@ -40,7 +39,6 @@ use tokio::{
 use tracing::{debug, instrument, trace, warn};
 
 mod config;
-pub use config::Config;
 
 mod bootstrap;
 use bootstrap::BootstrapEvent;
@@ -52,7 +50,10 @@ mod holepuncher;
 use holepuncher::HolepunchEvent;
 
 mod swarm_client;
-use swarm_client::{SwarmClient, SwarmCommand};
+use swarm_client::SwarmCommand;
+
+pub use config::Config;
+pub use swarm_client::SwarmClient;
 
 const MDNS_AGENT_STRING: &str = "sigil/1.0.0";
 const IDENTIFY_PROTOCOL_VERSION: &str = "TODO/0.0.1";
@@ -94,7 +95,23 @@ pub struct P2pNode {
 }
 
 impl P2pNode {
-    pub fn new(cfg: Config) -> Result<Self> {
+    pub fn start(cfg: Config) -> Result<SwarmClient> {
+        let (command_sender, command_receiver) = mpsc::channel(16);
+
+        let client = SwarmClient::new(command_sender.clone());
+
+        tokio::spawn(async move {
+            let mut p2p_node = Self::init(cfg).context("init p2p_node").unwrap();
+            p2p_node
+                .run(command_sender, command_receiver)
+                .await
+                .unwrap();
+        });
+
+        Ok(client)
+    }
+
+    fn init(cfg: Config) -> Result<Self> {
         let topic = gossipsub::IdentTopic::new(GOSSIPSUB_TOPIC);
         let swarm = build_swarm(&cfg, topic.clone())?;
         let relays = HashSet::new();
@@ -109,19 +126,22 @@ impl P2pNode {
         })
     }
 
-    pub async fn run(&mut self) -> Result<()> {
+    async fn run(
+        &mut self,
+        swarm_command_sender: Sender<SwarmCommand>,
+        mut swarm_command_receiver: Receiver<SwarmCommand>,
+    ) -> Result<()> {
         // start listening
         self.listen_on_addrs()
             .await
             .context("listen on all addrs")?;
 
         // TODO: how big should the channels be?
-        let (swarm_command_sender, mut swarm_command_receiver) = mpsc::channel(16);
         let (bootstrap_event_sender, bootstrap_event_receiver) = mpsc::channel(16);
         let (holepunch_event_sender, holepunch_event_receiver) = mpsc::channel(16);
         let (holepunch_req_sender, holepunch_req_receiver) = mpsc::channel(16);
 
-        let swarm_client = SwarmClient::new(swarm_command_sender, self.topic.clone());
+        let swarm_client = SwarmClient::new(swarm_command_sender);
 
         // start concurrent process to dial all nodes in the config
         trace!("starting initial bootstrap");
@@ -136,7 +156,7 @@ impl P2pNode {
         // start concurrent process to handle requests to hole punch
         trace!("starting to watch for holepunch requests");
         Self::watch_for_holepunch_request(
-            swarm_client,
+            swarm_client.clone(),
             holepunch_req_receiver,
             holepunch_event_receiver,
         )
@@ -156,6 +176,11 @@ impl P2pNode {
                 Ok(Some(line)) = stdin.next_line() => handle_input_line(self, line).context("handle input line")?,
             };
         }
+    }
+
+    /// returns the peer_id of the local P2pNode
+    pub fn local_peer_id(&self) -> String {
+        self.swarm.local_peer_id().to_string()
     }
 
     fn bootstrap(
@@ -246,7 +271,7 @@ impl P2pNode {
         Ok(())
     }
 
-    pub fn add_relay(&mut self, relay: Peer) {
+    pub(crate) fn add_relay(&mut self, relay: Peer) {
         trace!(?relay, "adding connected relay");
         self.relays.insert(relay);
     }
@@ -254,10 +279,12 @@ impl P2pNode {
     #[instrument(skip_all, level = "debug")]
     fn exec_swarm_command(self: &mut P2pNode, command: SwarmCommand) -> Result<()> {
         let swarm = &mut self.swarm;
+        // TODO: remove upwraps
         match command {
             // Gossipsub commands
-            SwarmCommand::GossipsubPublish { topic, data } => {
-                debug!(?data, "gossipsub publish");
+            SwarmCommand::GossipsubPublish { data } => {
+                debug!(?data, "GossipsubPublish");
+                let topic = self.topic.clone();
                 swarm
                     .behaviour_mut()
                     .gossipsub
@@ -266,20 +293,54 @@ impl P2pNode {
             }
             // Swarm commands
             SwarmCommand::Dial { multiaddr } => {
-                debug!(%multiaddr, "dial");
+                debug!(%multiaddr, "Dial");
                 swarm.dial(multiaddr).unwrap();
             }
             SwarmCommand::MyRelays { sender } => {
                 let my_relays = self.relays.clone();
-                debug!(?my_relays, "my_relays");
+                debug!(?my_relays, "MyRelays");
                 sender.send(my_relays).unwrap();
+            }
+            SwarmCommand::ConnectedPeers { sender } => {
+                let connected_peers: Vec<PeerId> = swarm.connected_peers().copied().collect();
+                debug!(?connected_peers, "ConnectedPeers");
+                sender.send(connected_peers).unwrap();
+            }
+            SwarmCommand::GossipsubMeshPeers { sender } => {
+                let topic = self.topic.clone();
+                let gossipsub_mesh_peers: Vec<PeerId> = swarm
+                    .behaviour()
+                    .gossipsub
+                    .mesh_peers(&topic.into())
+                    .copied()
+                    .collect();
+                debug!(?gossipsub_mesh_peers, "GossipsubMeshPeers");
+                sender.send(gossipsub_mesh_peers).unwrap();
+            }
+            SwarmCommand::KademliaRoutingTablePeers { sender } => {
+                let kademlia_routing_table_peers = swarm.behaviour_mut().kademlia.kbuckets().fold(
+                    HashMap::new(),
+                    |mut acc, kbucket| {
+                        kbucket.iter().for_each(|entry| {
+                            let peer_id = entry.node.key.into_preimage();
+                            let peer_multiaddrs: Vec<Multiaddr> =
+                                entry.node.value.iter().cloned().collect();
+                            acc.insert(peer_id, peer_multiaddrs);
+                        });
+                        acc
+                    },
+                );
+                debug!(?kademlia_routing_table_peers, "KademliaRoutingTablePeers");
+                sender.send(kademlia_routing_table_peers).unwrap();
+            }
+            SwarmCommand::MyPeerId { sender } => {
+                let my_peer_id = swarm.local_peer_id();
+                sender.send(*my_peer_id).unwrap();
             }
         };
 
         Ok(())
     }
-
-    // pub fn send_message()
 }
 
 fn generate_ed25519(secret_key_seed: u8) -> identity::Keypair {
@@ -483,3 +544,18 @@ pub fn find_ipv4(multiaddr_str: &str) -> Option<String> {
 
     multiaddr_parts.get(ipv4_index).map(|ipv4| ipv4.to_string())
 }
+
+// #[cfg(test)]
+// mod tests {
+//
+//     use super::*;
+//
+//     #[tokio::test]
+//     async fn smoke_test_swarm() {
+//         let toml_str = r#""#;
+//         let cfg: Config = toml::from_str(toml_str).unwrap();
+//         let client = P2pNode::start(cfg).unwrap();
+//         let connected_peers = client.connected_peers().await.unwrap();
+//         assert!(connected_peers.is_empty());
+//     }
+// }
