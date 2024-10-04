@@ -6,7 +6,6 @@ COPY build.rs build.rs
 COPY Cargo.toml Cargo.toml
 COPY Cargo.lock Cargo.lock
 COPY .env.build .env.build
-COPY example_sigil.toml sigil.toml
 
 # Copy any locally-present overrides into the testing image.
 COPY ./.temp_local_override[s]/ /usr/
@@ -20,7 +19,9 @@ EOF
 # Copy the binary to a distribution image.
 FROM debian:bookworm-slim
 COPY --from=builder /usr/src/sigil/target/debug/sigil /usr/local/bin/sigil
-COPY --from=builder /usr/src/sigil/sigil.toml /usr/src/sigil/sigil.toml
+
+# Copy over all the different configurations that will be used in the tests
+COPY tests/test_configs/ /usr/src/sigil/test_configs
+
 WORKDIR /usr/src/sigil
 ENTRYPOINT ["sigil"]
-

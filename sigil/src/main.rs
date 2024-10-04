@@ -5,16 +5,16 @@ use jsonrpsee::proc_macros::rpc;
 use jsonrpsee::server::{RpcModule, ServerBuilder};
 use priory::{P2pNode, SwarmClient};
 use std::collections::hash_map::DefaultHasher;
-use std::error::Error;
 use std::hash::{Hash, Hasher};
 use std::time::Duration;
+use std::{env, error::Error};
 use tokio::{io, io::AsyncBufReadExt, select};
 use tracing_subscriber::EnvFilter;
 
 mod config;
 use config::Config;
 
-const CONFIG_FILE_PATH: &str = "sigil.toml";
+const ENV_KEY_CONFIG_TOML_PATH: &str = "CONFIG_TOML_PATH";
 
 #[rpc(server)]
 pub trait MyApi {
@@ -26,6 +26,8 @@ pub trait MyApi {
     async fn gossipsub_mesh_peers(&self) -> RpcResult<String>;
     #[method(name = "kademlia_routing_table_peers")]
     async fn kademlia_routing_table_peers(&self) -> RpcResult<String>;
+    #[method(name = "my_peer_id")]
+    async fn my_peer_id(&self) -> RpcResult<String>;
 }
 
 pub struct MyApiImpl {
@@ -71,11 +73,23 @@ impl MyApiServer for MyApiImpl {
 
         Ok(format!("{:?}", kademlia_routing_table_peers))
     }
+
+    async fn my_peer_id(&self) -> RpcResult<String> {
+        let my_peer_id = self
+            .p2p_node_client
+            .my_peer_id()
+            .await
+            .context("request my_peer_id from p2p node client")
+            .unwrap();
+
+        Ok(format!("{:?}", my_peer_id))
+    }
 }
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    let cfg = Config::parse(CONFIG_FILE_PATH)?;
+    let config_toml_path = env::var(ENV_KEY_CONFIG_TOML_PATH).unwrap_or("sigil.toml".into());
+    let cfg = Config::parse(&config_toml_path)?;
 
     let _ = tracing_subscriber::fmt()
         .with_env_filter(EnvFilter::from_default_env())
@@ -103,6 +117,4 @@ async fn main() -> Result<()> {
 
     // simulate doing things
     loop {}
-
-    Ok(())
 }
