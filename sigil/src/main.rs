@@ -9,6 +9,7 @@ use std::hash::{Hash, Hasher};
 use std::time::Duration;
 use std::{env, error::Error};
 use tokio::{io, io::AsyncBufReadExt, select};
+use tracing::debug;
 use tracing_subscriber::EnvFilter;
 
 mod config;
@@ -90,6 +91,7 @@ impl MyApiServer for MyApiImpl {
 async fn main() -> Result<()> {
     let config_toml_path = env::var(ENV_KEY_CONFIG_TOML_PATH).unwrap_or("sigil.toml".into());
     let cfg = Config::parse(&config_toml_path)?;
+    debug!("found config file {config_toml_path}");
 
     let _ = tracing_subscriber::fmt()
         .with_env_filter(EnvFilter::from_default_env())

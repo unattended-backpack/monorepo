@@ -9,13 +9,14 @@ use testcontainers::{
 
 pub struct SigilTestInstance {
     container: ContainerAsync<GenericImage>,
-    host_port: u16,
+    pub host_port: u16,
     reqwest_client: reqwest::Client,
 }
 
 impl SigilTestInstance {
-    pub async fn new(config_file: &str, port: u16) -> Self {
+    pub async fn new(config_file: &str) -> Self {
         let config_toml_path = format!("test_configs/{config_file}");
+        let port = 3030;
 
         // TODO: how can we pass in different sigil.toml files to test different configurations?
         // TODO: also how can we run sigil in the container with RUST_LOG=priory=trace,warn ?
@@ -33,6 +34,12 @@ impl SigilTestInstance {
             .await
             .expect("Failed to get host port");
 
+        let internal_port = container
+            .ports()
+            .await
+            .context("get internal ports")
+            .unwrap();
+
         let reqwest_client = reqwest::Client::new();
 
         Self {
@@ -49,30 +56,33 @@ impl SigilTestInstance {
         params: Option<&str>,
         expected: &str,
     ) -> Result<()> {
-        if let Err(e) = async {
-            let response = self.rpc(method, params).await?;
+        let response = self.rpc(method, params).await?;
 
-            if !response.contains(expected) {
-                anyhow::bail!(
-                    "Response does not contain expected text. \nexpected: {}\nactual: {}\n",
-                    expected,
-                    response
-                );
-            }
-            Ok(())
+        if !response.contains(expected) {
+            anyhow::bail!(
+                "Response does not contain expected text. \nexpected: {}\nactual: {}\n",
+                expected,
+                response
+            );
         }
-        .await
-        {
-            let logs = self.get_container_logs().await;
-            return Err(anyhow!("Test failed: {}\nContainer logs:\n{}", e, logs));
-        } else {
-            Ok(())
-        }
+
+        Ok(())
     }
 
     // makes the rpc call and returns just the body
     pub async fn rpc(&self, method: &str, params: Option<&str>) -> Result<String> {
         let params = params.unwrap_or("");
+
+        match self.rpc_impl(method, params).await {
+            Ok(res) => Ok(res),
+            Err(e) => {
+                let logs = self.get_container_logs().await;
+                Err(anyhow!("Test failed: {}\nContainer logs:\n{}", e, logs))
+            }
+        }
+    }
+
+    async fn rpc_impl(&self, method: &str, params: &str) -> Result<String> {
         let response = self
             .reqwest_client
             .post(&format!("http://localhost:{}", self.host_port))
@@ -93,9 +103,16 @@ impl SigilTestInstance {
     }
 
     pub async fn get_container_logs(&self) -> String {
-        match self.container.stdout_to_vec().await {
+        let std_out = match self.container.stdout_to_vec().await {
             Ok(log_bytes) => String::from_utf8_lossy(&log_bytes).into_owned(),
             Err(e) => format!("Failed to retrieve container logs: {}", e),
-        }
+        };
+
+        let std_err = match self.container.stderr_to_vec().await {
+            Ok(log_bytes) => String::from_utf8_lossy(&log_bytes).into_owned(),
+            Err(e) => format!("Failed to retrieve container logs: {}", e),
+        };
+
+        format!("{std_out}\n{std_err}")
     }
 }
