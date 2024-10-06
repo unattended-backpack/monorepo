@@ -26,6 +26,6 @@ Once built, the project may be tested as usual using the standard `cargo test`. 
 
 ## Running
 
-Sigil requires a `.toml` config file to run.  By default, sigil looks for a `sigil.toml` in the same directory, but this can be changed by setting env var `CONFIG_TOML_PATH=<path to your .toml config file>`.  For an example: make a copy of `example_sigil.toml` and rename it: `$ cp example_sigil.toml sigil.toml`.  If connecting to an existing p2p network, the multiaddr and peer_id of at least 1 public node in the network must be supplied.
+Sigil requires a `.toml` config file to run. By default, sigil looks for a `sigil.toml` in the current working directory, but this can be changed by setting the environment variable `CONFIG_TOML_PATH=<path to your .toml config file>`. For an example: make a copy of `example_sigil.toml` and rename it: `$ cp example_sigil.toml sigil.toml`. If connecting to an existing network, the `multiaddr` and `peer_id` of at least one public node in the network must be supplied.
 
 Once built (see [Building](#building)), the binary can be run using the generated docker image `$ docker run sigil:dev` or cargo `$ cargo run`.
