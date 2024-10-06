@@ -1,9 +1,11 @@
 use anyhow::{anyhow, Context, Result};
+use serde_json::Value;
 use testcontainers::{
     core::{ContainerAsync, IntoContainerPort, WaitFor},
     runners::AsyncRunner,
     GenericImage, ImageExt,
 };
+use tokio::time::Duration;
 
 // TODO: there are a lot of constansts in here.  They will either be params or real CONST vars.
 
@@ -28,6 +30,9 @@ impl SigilTestInstance {
             .start()
             .await
             .expect("Failed to start sigil container");
+
+        // give it a chance to make connections or crash
+        tokio::time::sleep(Duration::from_millis(500)).await;
 
         let host_port = container
             .get_host_port_ipv4(port)
@@ -99,7 +104,20 @@ impl SigilTestInstance {
                 method, params
             ))?;
 
-        response.text().await.context("Failed to get response body")
+        let body = response
+            .text()
+            .await
+            .context("Failed to get response body")?;
+
+        let json: Value = serde_json::from_str(&body)
+            .context(format!("parse rpc response from {method} as json"))?;
+
+        json["result"]
+            .as_str()
+            .context(format!(
+                "extract result field from json response to {method}"
+            ))
+            .map(|s| s.into())
     }
 
     pub async fn get_container_logs(&self) -> String {

@@ -20,7 +20,9 @@ It is our hope that we have successfully encapsulated this admittedly-convoluted
 
 ## Testing
 
-Once built, the project may be tested as usual using the standard `cargo test`. Some integration tests rely on the ability to access a Docker image of the client to test inter-client communications.
+Once built, the project may be tested as usual using the standard `cargo test`. Some integration tests rely on the ability to access a Docker image of the client to test inter-client communications.  
+
+* If the tests are manually cancelled, make sure to also manually stop any docker containers started by the test.
 
 ## Running
 
