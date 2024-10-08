@@ -15,6 +15,45 @@ use test_helper::SigilTestInstance;
 
 #[tokio::test]
 #[serial]
+async fn test_3_mdns_connections() {
+    let sigil_a = SigilTestInstance::new("a.toml").await;
+    let sigil_b = SigilTestInstance::new("b.toml").await;
+    let sigil_c = SigilTestInstance::new("c.toml").await;
+
+    let sigil_a_peer_id = sigil_a.rpc("my_peer_id", None).await.unwrap();
+    let sigil_b_peer_id = sigil_b.rpc("my_peer_id", None).await.unwrap();
+    let sigil_c_peer_id = sigil_c.rpc("my_peer_id", None).await.unwrap();
+
+    let sigil_instances = vec![sigil_a, sigil_b, sigil_c];
+    let sigil_peer_ids = vec![sigil_a_peer_id, sigil_b_peer_id, sigil_c_peer_id];
+
+    for (i, sigil_instance) in sigil_instances.iter().enumerate() {
+        for (j, sigil_peer_id) in sigil_peer_ids.iter().enumerate() {
+            // skip checking for the the peer_id of the current sigil_instance
+            if i == j {
+                continue;
+            }
+
+            sigil_instance
+                .rpc_with_expected("connected_peers", None, sigil_peer_id)
+                .await
+                .unwrap();
+
+            sigil_instance
+                .rpc_with_expected("kademlia_routing_table_peers", None, sigil_peer_id)
+                .await
+                .unwrap();
+
+            sigil_instance
+                .rpc_with_expected("gossipsub_mesh_peers", None, sigil_peer_id)
+                .await
+                .unwrap();
+        }
+    }
+}
+
+#[tokio::test]
+#[serial]
 async fn test_2_mdns_connections() {
     let sigil_a = SigilTestInstance::new("a.toml").await;
     let sigil_b = SigilTestInstance::new("b.toml").await;
@@ -22,35 +61,32 @@ async fn test_2_mdns_connections() {
     let sigil_a_peer_id = sigil_a.rpc("my_peer_id", None).await.unwrap();
     let sigil_b_peer_id = sigil_b.rpc("my_peer_id", None).await.unwrap();
 
-    sigil_a
-        .rpc_with_expected("connected_peers", None, &sigil_b_peer_id)
-        .await
-        .unwrap();
+    let sigil_instances = vec![sigil_a, sigil_b];
+    let sigil_peer_ids = vec![sigil_a_peer_id, sigil_b_peer_id];
 
-    sigil_a
-        .rpc_with_expected("gossipsub_mesh_peers", None, &sigil_b_peer_id)
-        .await
-        .unwrap();
+    for (i, sigil_instance) in sigil_instances.iter().enumerate() {
+        for (j, sigil_peer_id) in sigil_peer_ids.iter().enumerate() {
+            // skip checking for the the peer_id of the current sigil_instance
+            if i == j {
+                continue;
+            }
 
-    sigil_a
-        .rpc_with_expected("kademlia_routing_table_peers", None, &sigil_b_peer_id)
-        .await
-        .unwrap();
+            sigil_instance
+                .rpc_with_expected("connected_peers", None, sigil_peer_id)
+                .await
+                .unwrap();
 
-    sigil_b
-        .rpc_with_expected("connected_peers", None, &sigil_a_peer_id)
-        .await
-        .unwrap();
+            sigil_instance
+                .rpc_with_expected("kademlia_routing_table_peers", None, sigil_peer_id)
+                .await
+                .unwrap();
 
-    sigil_b
-        .rpc_with_expected("gossipsub_mesh_peers", None, &sigil_a_peer_id)
-        .await
-        .unwrap();
-
-    sigil_b
-        .rpc_with_expected("kademlia_routing_table_peers", None, &sigil_a_peer_id)
-        .await
-        .unwrap();
+            sigil_instance
+                .rpc_with_expected("gossipsub_mesh_peers", None, sigil_peer_id)
+                .await
+                .unwrap();
+        }
+    }
 }
 
 #[tokio::test]

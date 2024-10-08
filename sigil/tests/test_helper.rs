@@ -32,7 +32,7 @@ impl SigilTestInstance {
             .expect("Failed to start sigil container");
 
         // give it a chance to make connections or crash
-        tokio::time::sleep(Duration::from_millis(500)).await;
+        tokio::time::sleep(Duration::from_millis(1000)).await;
 
         let host_port = container
             .get_host_port_ipv4(port)
@@ -45,7 +45,10 @@ impl SigilTestInstance {
             .context("get internal ports")
             .unwrap();
 
-        let reqwest_client = reqwest::Client::new();
+        let reqwest_client = reqwest::ClientBuilder::new()
+            .timeout(Duration::from_secs(60))
+            .build()
+            .unwrap();
 
         Self {
             container,
@@ -65,7 +68,7 @@ impl SigilTestInstance {
 
         if !response.contains(expected) {
             anyhow::bail!(
-                "Response does not contain expected text. \nexpected: {}\nactual: {}\n",
+                "Response to method {method} with params {params:?} does not contain expected text. \nexpected: {}\nactual: {}\n",
                 expected,
                 response
             );
