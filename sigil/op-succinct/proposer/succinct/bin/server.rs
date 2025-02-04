@@ -187,20 +187,6 @@ async fn request_span_proof(
         }
     };
 
-    // let client = ProverClient::builder().network().build();
-    // let proof_id = client
-    //     .prove(&state.range_pk, &sp1_stdin)
-    //     .compressed()
-    //     .strategy(state.range_proof_strategy)
-    //     .skip_simulation(true)
-    //     .cycle_limit(1_000_000_000_000)
-    //     .request_async()
-    //     .await
-    //     .map_err(|e| {
-    //         error!("Failed to request proof: {}", e);
-    //         AppError(anyhow::anyhow!("Failed to request proof: {}", e))
-    //     })?;
-
     let proof_id = send_proof(
         ProofType::Span,
         state.proof_store.clone(),
@@ -282,19 +268,6 @@ async fn request_agg_proof(
         sp1_stdin,
     )
     .await?;
-    // let proof_id = match prover
-    //     .prove(&state.agg_pk, &stdin)
-    //     .groth16()
-    //     .strategy(state.agg_proof_strategy)
-    //     .request_async()
-    //     .await
-    // {
-    //     Ok(id) => id,
-    //     Err(e) => {
-    //         error!("Failed to request proof: {}", e);
-    //         return Err(AppError(anyhow::anyhow!("Failed to request proof: {}", e)));
-    //     }
-    // };
 
     Ok((StatusCode::OK, Json(ProofResponse { proof_id })))
 }
@@ -493,27 +466,6 @@ async fn get_proof_status(
         }
     };
 
-    // Check the deadline.
-    // TODO: add back in
-    // if status.deadline
-    //     < SystemTime::now()
-    //         .duration_since(UNIX_EPOCH)
-    //         .unwrap()
-    //         .as_secs()
-    // {
-    //     error!(
-    //         "Proof request timed out on the server. Default timeout is set to 4 hours. Returning status as Unfulfillable."
-    //     );
-    //     return Ok((
-    //         StatusCode::OK,
-    //         Json(ProofStatus {
-    //             fulfillment_status: FulfillmentStatus::Unfulfillable.into(),
-    //             execution_status: ExecutionStatus::Executed.into(),
-    //             proof: vec![],
-    //         }),
-    //     ));
-    // }
-
     let fulfillment_status = status.fulfillment_status;
     let execution_status = status.execution_status;
     info!(
@@ -523,30 +475,30 @@ async fn get_proof_status(
 
     // if fulfilled, return proof
     if fulfillment_status == FulfillmentStatus::Fulfilled as i32 {
-        return Ok((
+        Ok((
             StatusCode::OK,
             Json(ProofStatus {
                 fulfillment_status,
                 execution_status,
                 proof: status.proof,
             }),
-        ));
+        ))
     // otherwise, return current status & no proof
     } else {
-        return Ok((
+        Ok((
             StatusCode::OK,
             Json(ProofStatus {
                 fulfillment_status,
                 execution_status,
                 proof: vec![],
             }),
-        ));
+        ))
     }
 }
 
 // spawns a process that creates a proof locally
 // runs proof in a background thread.  Only needs to be async because of
-// proof_store.write().await.  It isn't blocked by anything else
+// proof_store.write().await.  It isn't blocked by anything else.
 async fn send_proof(
     proof_type: ProofType,
     proof_store: ProofStore,
