@@ -1,0 +1,6 @@
+# all .env
+**/.env
+**/.env.*
+
+# rust build directories
+**/target/

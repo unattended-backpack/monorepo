@@ -17,6 +17,7 @@ For art assets specifically, in case you want to further split hairs or attempt 
 # Projects
 
 The modern internet is sterile and unfree. It is opaque and riddled with censorship. Our mission at Unattended Backpack is to build maximally-trustless software that restores user sovereignty. Working from the fundamentals, this leads us to conclude the following:
+
 1. We need fully-composable and unstoppable compute.
 2. A blockchain is best suited for this: software can exist immutably where anyone can interact with it.
 3. The measure of unstoppability is a function of how trustless the underlying blockchain is.
@@ -28,16 +29,11 @@ The modern internet is sterile and unfree. It is opaque and riddled with censors
 9. Then we can build everything else we want on the L2.
 
 Therefore, we are building the following projects.
+
 - [Priory](#priory): a Rust crate that stands on the shoulders of giants ([libp2p](https://libp2p.io/)) and makes managing a robust peer-to-peer gossip network easier.
 - [Sigil](#sigil): a fully-trustless L2 that we can be proud of building on. Achieving this is our grandest of missions and unlocks incredible possibilities.
 
 All of these projects are libre and copyleft; we welcome all [contributors](./CONTRIBUTING.md).
-
-## Priory
-
-Priory is a Rust crate for managing joining communication in a strongly-opinionated ([libp2p](https://libp2p.io/)) swarm. This is a thin wrapper around libp2p implementing some custom peer discovery techniques for achieving maximal connectivity across peers local, public, or holepunched into.
-
-The Priory library, alongside its building and testing instructions, is located in the [`priory`](./priory/) folder.
 
 ## Sigil
 
@@ -50,3 +46,17 @@ Like those sigils of old, our Sigil is an esoteric and forbidden tool. Our Sigil
 Sigil is an Ethereum rollup with no centralized mechanisms. Sigil will save Ethereum.
 
 The Sigil client, for participating in the rollup, is located in the [`sigil`](./sigil/) folder. That folder also includes useful instructions for building and testing the project.
+
+## Priory
+
+Priory is a Rust crate for managing joining communication in a strongly-opinionated ([libp2p](https://libp2p.io/)) swarm. This is a thin wrapper around libp2p implementing some custom peer discovery techniques for achieving maximal connectivity across peers local, public, or holepunched into.
+
+The Priory library, alongside its building and testing instructions, is located in the [`priory`](./priory/) folder.
+
+Priory development has been moved onto the backlog for the time being.
+
+## Homeroll
+
+An empty node to serve as a mount for Priory testing.  
+
+Development is on backlog along with Priory.

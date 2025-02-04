@@ -1,0 +1,23 @@
+[
+  {
+    "bytes": "32",
+    "label": "l1ContractsRelease",
+    "offset": 0,
+    "slot": "0",
+    "type": "string"
+  },
+  {
+    "bytes": "288",
+    "label": "blueprint",
+    "offset": 0,
+    "slot": "1",
+    "type": "struct OPContractsManager.Blueprints"
+  },
+  {
+    "bytes": "320",
+    "label": "implementation",
+    "offset": 0,
+    "slot": "10",
+    "type": "struct OPContractsManager.Implementations"
+  }
+]

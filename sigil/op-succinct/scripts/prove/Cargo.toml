@@ -1,0 +1,47 @@
+[package]
+name = "op-succinct-prove"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+
+[[bin]]
+name = "multi"
+path = "bin/multi.rs"
+
+[[bin]]
+name = "agg"
+path = "bin/agg.rs"
+
+[dependencies]
+
+# workspace
+tokio = { workspace = true }
+clap = { workspace = true }
+cargo_metadata = { workspace = true }
+anyhow.workspace = true
+dotenv.workspace = true
+csv.workspace = true
+
+# kona
+kona-host = { workspace = true }
+
+# local
+op-succinct-host-utils.workspace = true
+op-succinct-client-utils.workspace = true
+op-succinct-scripts = { path = "../utils" }
+
+# alloy
+alloy-primitives = { workspace = true }
+
+# sp1
+sp1-sdk = { workspace = true }
+
+[dev-dependencies]
+reqwest = { version = "0.12.4", features = ["json"] }
+serde_json = { workspace = true }
+
+[build-dependencies]
+op-succinct-build-utils.workspace = true

@@ -1,0 +1,15 @@
+[submodule "sigil/op-succinct/contracts/lib/forge-std"]
+	path = sigil/op-succinct/contracts/lib/forge-std
+	url = https://github.com/foundry-rs/forge-std
+[submodule "sigil/op-succinct/contracts/lib/optimism"]
+	path = sigil/op-succinct/contracts/lib/optimism
+	url = https://github.com/ethereum-optimism/optimism
+[submodule "sigil/op-succinct/contracts/lib/openzeppelin-contracts"]
+	path = sigil/op-succinct/contracts/lib/openzeppelin-contracts
+	url = https://github.com/openzeppelin/openzeppelin-contracts
+[submodule "sigil/op-succinct/contracts/lib/sp1-contracts"]
+	path = sigil/op-succinct/contracts/lib/sp1-contracts
+	url = https://github.com/succinctlabs/sp1-contracts
+[submodule "sigl/op-succinct/contracts/lib/solady"]
+        path = sigil/op-succinct/contracts/lib/solady
+        url = https://github.com/vectorized/solady
