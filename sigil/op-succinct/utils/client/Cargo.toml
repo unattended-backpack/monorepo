@@ -1,0 +1,48 @@
+[package]
+name = "op-succinct-client-utils"
+version = "0.1.0"
+license.workspace = true
+edition.workspace = true
+
+[dependencies]
+# workspace (general)
+anyhow.workspace = true
+async-trait.workspace = true
+thiserror.workspace = true
+serde_json.workspace = true
+
+# workspace (ethereum)
+op-alloy-consensus.workspace = true
+alloy-consensus.workspace = true
+alloy-rlp.workspace = true
+alloy-eips.workspace = true
+alloy-primitives.workspace = true
+alloy-sol-types.workspace = true
+revm.workspace = true
+
+# workspace (op-alloy)
+op-alloy-genesis.workspace = true
+op-alloy-protocol.workspace = true
+op-alloy-rpc-types-engine.workspace = true
+
+# workspace (kona)
+kona-common.workspace = true
+kona-client.workspace = true
+kona-preimage.workspace = true
+kona-mpt.workspace = true
+kona-derive.workspace = true
+kona-proof.workspace = true
+kona-executor.workspace = true
+kona-driver.workspace = true
+
+# general
+serde.workspace = true
+rkyv.workspace = true
+sha2.workspace = true
+log.workspace = true
+tracing.workspace = true
+itertools.workspace = true
+spin.workspace = true
+
+# kzg
+kzg-rs.workspace = true

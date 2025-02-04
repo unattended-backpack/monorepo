@@ -1,0 +1,47 @@
+[package]
+name = "op-succinct-host-utils"
+version = "0.1.0"
+license.workspace = true
+edition.workspace = true
+
+[dependencies]
+
+# sp1
+sp1-sdk.workspace = true
+
+# local
+op-succinct-client-utils.workspace = true
+
+# op-alloy
+op-alloy-genesis.workspace = true
+op-alloy-rpc-types.workspace = true
+op-alloy-network.workspace = true
+op-alloy-protocol.workspace = true
+op-alloy-consensus.workspace = true
+
+# alloy
+alloy = { workspace = true }
+alloy-rlp.workspace = true
+alloy-primitives.workspace = true
+alloy-consensus.workspace = true
+alloy-sol-types.workspace = true
+alloy-eips.workspace = true
+
+# kona
+kona-host.workspace = true
+
+# general
+rkyv.workspace = true
+serde_json.workspace = true
+anyhow.workspace = true
+cargo_metadata.workspace = true
+serde_cbor.workspace = true
+dotenv.workspace = true
+tokio.workspace = true
+futures.workspace = true
+num-format.workspace = true
+serde.workspace = true
+reqwest.workspace = true
+log.workspace = true
+sysinfo = "0.32.0"
+

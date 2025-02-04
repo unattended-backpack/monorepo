@@ -1,0 +1,64 @@
+[package]
+name = "op-succinct-scripts"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+
+[[bin]]
+name = "fetch-and-save-proof"
+path = "bin/fetch_and_save_proof.rs"
+
+[[bin]]
+name = "vkey"
+path = "bin/vkey.rs"
+
+[[bin]]
+name = "cost-estimator"
+path = "bin/cost_estimator.rs"
+
+[[bin]]
+name = "block-data"
+path = "bin/block_data.rs"
+
+[[bin]]
+name = "fetch-rollup-config"
+path = "bin/fetch_rollup_config.rs"
+
+[[bin]]
+name = "gen-sp1-test-artifacts"
+path = "bin/gen_sp1_test_artifacts.rs"
+
+[dependencies]
+
+# workspace
+alloy-primitives = { workspace = true }
+alloy = { workspace = true }
+bincode = { workspace = true }
+tokio = { workspace = true }
+clap = { workspace = true }
+cargo_metadata = { workspace = true }
+anyhow.workspace = true
+dotenv.workspace = true
+log.workspace = true
+csv.workspace = true
+serde = { workspace = true }
+reqwest = { workspace = true }
+futures.workspace = true
+rayon = "1.10.0"
+serde_json.workspace = true
+
+# kona
+kona-host = { workspace = true }
+
+# local
+op-succinct-host-utils.workspace = true
+op-succinct-client-utils.workspace = true
+
+# sp1
+sp1-sdk = { workspace = true }
+
+[build-dependencies]
+op-succinct-build-utils.workspace = true
