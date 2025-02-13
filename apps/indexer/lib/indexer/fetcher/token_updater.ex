@@ -52,7 +52,7 @@ defmodule Indexer.Fetcher.TokenUpdater do
       |> Duration.to_minutes()
       |> trunc()
 
-    {:ok, tokens} = Token.stream_cataloged_tokens(initial, reducer, interval_in_minutes, true)
+    {:ok, tokens} = Chain.stream_cataloged_tokens(initial, reducer, interval_in_minutes, true)
 
     tokens
   end
@@ -88,10 +88,6 @@ defmodule Indexer.Fetcher.TokenUpdater do
   end
 
   def update_metadata(%Token{} = token, metadata) do
-    metadata_with_metadata_updated_at =
-      metadata
-      |> Map.put(:metadata_updated_at, DateTime.utc_now())
-
-    Token.update(token, metadata_with_metadata_updated_at, false, :metadata_update)
+    Chain.update_token(token, metadata)
   end
 end

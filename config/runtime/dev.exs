@@ -130,8 +130,7 @@ for repo <- [
       Explorer.Repo.ZkSync,
       # Feature dependent repos
       Explorer.Repo.BridgedTokens,
-      Explorer.Repo.ShrunkInternalTransactions,
-      Explorer.Repo.Neon
+      Explorer.Repo.ShrunkInternalTransactions
     ] do
   config :explorer, repo,
     database: database,

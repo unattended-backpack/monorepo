@@ -2,7 +2,7 @@ defmodule BlockScoutWeb.NFTHelper do
   @moduledoc """
     Module with functions for NFT view
   """
-  alias Explorer.Token.MetadataRetriever
+  @ipfs_protocol "ipfs://"
 
   def get_media_src(nil, _), do: nil
 
@@ -57,52 +57,39 @@ defmodule BlockScoutWeb.NFTHelper do
     image_url
     |> URI.decode()
     |> URI.encode()
-    |> compose_resource_url()
+    |> compose_ipfs_url()
   end
 
-  @doc """
-  Composes a full IPFS URL from the given image URL.
+  def compose_ipfs_url(nil), do: nil
 
-  ## Parameters
-
-    - image_url: The URL of the image to be composed into an IPFS URL. It can be nil.
-
-  ## Returns
-
-    - A string representing the full IPFS URL or nil.
-
-  ## Examples
-
-      iex> compose_resource_url("ipfs://QmTzQ1e1Y1e1Y1e1Y1e1Y1e1Y1e1Y1e1Y1e1Y1e1Y1")
-      "https://ipfs.io/ipfs/QmTzQ1e1Y1e1Y1e1Y1e1Y1e1Y1e1Y1e1Y1e1Y1e1Y1"
-
-  """
-  @spec compose_resource_url(String.t() | nil) :: String.t() | nil
-  def compose_resource_url(nil), do: nil
-
-  def compose_resource_url(image_url) do
+  def compose_ipfs_url(image_url) do
     image_url_downcase =
       image_url
       |> String.downcase()
 
     cond do
       image_url_downcase =~ ~r/^ipfs:\/\/ipfs/ ->
-        # take resource id after "ipfs://ipfs/" prefix
-        resource_id = image_url |> String.slice(12..-1//1)
-        MetadataRetriever.ipfs_link(resource_id, true)
+        prefix = @ipfs_protocol <> "ipfs/"
+        ipfs_link(image_url, prefix)
 
       image_url_downcase =~ ~r/^ipfs:\/\// ->
-        # take resource id after "ipfs://" prefix
-        resource_id = image_url |> String.slice(7..-1//1)
-        MetadataRetriever.ipfs_link(resource_id, true)
-
-      image_url_downcase =~ ~r/^ar:\/\// ->
-        # take resource id after "ar://" prefix
-        resource_id = image_url |> String.slice(5..-1//1)
-        MetadataRetriever.arweave_link(resource_id)
+        prefix = @ipfs_protocol
+        ipfs_link(image_url, prefix)
 
       true ->
         image_url
     end
+  end
+
+  defp ipfs_link(image_url, prefix) do
+    ipfs_uid = String.slice(image_url, String.length(prefix)..-1//1)
+
+    public_ipfs_gateway_url =
+      :indexer
+      |> Application.get_env(:ipfs)
+      |> Keyword.get(:public_gateway_url)
+      |> String.trim_trailing("/")
+
+    public_ipfs_gateway_url <> "/" <> ipfs_uid
   end
 end

@@ -34,7 +34,8 @@ defmodule EthereumJSONRPC.HTTP do
       {:ok, response}
     else
       error ->
-        increment_error_count(url, url_type, options)
+        named_arguments = [transport: __MODULE__, transport_options: Keyword.delete(options, :method_to_url)]
+        EndpointAvailabilityObserver.inc_error_count(url, named_arguments, url_type)
         error
     end
   end
@@ -76,23 +77,20 @@ defmodule EthereumJSONRPC.HTTP do
         rechunk_json_rpc(chunks, options, response, decoded_response_bodies)
 
       {:ok, %{body: body, status_code: status_code}} ->
-        case decode_json(
-               request: [url: url, body: json, headers: headers()],
-               response: [status_code: status_code, body: body]
-             ) do
-          {:ok, decoded_body} ->
-            chunked_json_rpc(tail, options, [decoded_body | decoded_response_bodies])
-
-          error ->
-            increment_error_count(url, url_type, options)
-            error
+        with {:ok, decoded_body} <-
+               decode_json(
+                 request: [url: url, body: json, headers: headers()],
+                 response: [status_code: status_code, body: body]
+               ) do
+          chunked_json_rpc(tail, options, [decoded_body | decoded_response_bodies])
         end
 
       {:error, :timeout} ->
         rechunk_json_rpc(chunks, options, :timeout, decoded_response_bodies)
 
       {:error, _} = error ->
-        increment_error_count(url, url_type, options)
+        named_arguments = [transport: __MODULE__, transport_options: Keyword.delete(options, :method_to_url)]
+        EndpointAvailabilityObserver.inc_error_count(url, named_arguments, url_type)
         error
     end
   end
@@ -168,11 +166,6 @@ defmodule EthereumJSONRPC.HTTP do
 
   defp handle_response(resp, _status) do
     {:error, resp}
-  end
-
-  defp increment_error_count(url, url_type, options) do
-    named_arguments = [transport: __MODULE__, transport_options: Keyword.delete(options, :method_to_url)]
-    EndpointAvailabilityObserver.inc_error_count(url, named_arguments, url_type)
   end
 
   @doc """

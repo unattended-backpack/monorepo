@@ -263,10 +263,7 @@ defmodule BlockScoutWeb.API.V2.SmartContractControllerTest do
         "constructor_args" => target_contract.constructor_arguments,
         "decoded_constructor_args" => [
           ["0x0000000000000000000000000000000000000000", %{"name" => "_proxyStorage", "type" => "address"}],
-          [
-            Address.checksum("0x2Cf6E7c9eC35D0B08A1062e13854f74b1aaae54e"),
-            %{"name" => "_implementationAddress", "type" => "address"}
-          ]
+          ["0x2Cf6E7c9eC35D0B08A1062e13854f74b1aaae54e", %{"name" => "_implementationAddress", "type" => "address"}]
         ],
         "is_self_destructed" => false,
         "deployed_bytecode" =>
@@ -852,7 +849,7 @@ defmodule BlockScoutWeb.API.V2.SmartContractControllerTest do
 
         assert response["decoded_constructor_args"] == [
                  [
-                   Address.checksum("0xc35DADB65012eC5796536bD9864eD8773aBc74C4"),
+                   "0xc35DADB65012eC5796536bD9864eD8773aBc74C4",
                    %{
                      "internalType" => "address",
                      "name" => "_factory",
@@ -860,7 +857,7 @@ defmodule BlockScoutWeb.API.V2.SmartContractControllerTest do
                    }
                  ],
                  [
-                   Address.checksum("0xB4FBF271143F4FBf7B91A5ded31805e42b2208d6"),
+                   "0xB4FBF271143F4FBf7B91A5ded31805e42b2208d6",
                    %{
                      "internalType" => "address",
                      "name" => "_WETH",
@@ -873,7 +870,7 @@ defmodule BlockScoutWeb.API.V2.SmartContractControllerTest do
 
         assert response["external_libraries"] == [
                  %{
-                   "address_hash" => Address.checksum("0x00000000D41867734BBee4C6863D9255b2b06aC1"),
+                   "address_hash" => "0x00000000D41867734BBee4C6863D9255b2b06aC1",
                    "name" => "__CACHE_BREAKER__"
                  }
                ]
@@ -1071,11 +1068,11 @@ defmodule BlockScoutWeb.API.V2.SmartContractControllerTest do
 
         assert response["external_libraries"] == [
                  %{
-                   "address_hash" => Address.checksum("0x22DE6B06544Ee5Cd907813a04bcdEd149A2f49D2"),
+                   "address_hash" => "0x22DE6B06544Ee5Cd907813a04bcdEd149A2f49D2",
                    "name" => "lib/base58-solidity/contracts/Base58.sol:Base58"
                  },
                  %{
-                   "address_hash" => Address.checksum("0x019d3788F00a7087234f3844CB1ceCe1F9982B7A"),
+                   "address_hash" => "0x019d3788F00a7087234f3844CB1ceCe1F9982B7A",
                    "name" => "src/libraries/ZkAddress.sol:ZkAddress"
                  }
                ]
@@ -1200,7 +1197,7 @@ defmodule BlockScoutWeb.API.V2.SmartContractControllerTest do
 
         assert response["external_libraries"] == [
                  %{
-                   "address_hash" => Address.checksum("0x00000000D41867734BBee4C6863D9255b2b06aC1"),
+                   "address_hash" => "0x00000000D41867734BBee4C6863D9255b2b06aC1",
                    "name" => "__CACHE_BREAKER__"
                  }
                ]
@@ -1327,7 +1324,7 @@ defmodule BlockScoutWeb.API.V2.SmartContractControllerTest do
 
         assert response["external_libraries"] == [
                  %{
-                   "address_hash" => Address.checksum("0x00000000D41867734BBee4C6863D9255b2b06aC1"),
+                   "address_hash" => "0x00000000D41867734BBee4C6863D9255b2b06aC1",
                    "name" => "__CACHE_BREAKER__"
                  }
                ]
@@ -1454,7 +1451,7 @@ defmodule BlockScoutWeb.API.V2.SmartContractControllerTest do
 
         assert response["external_libraries"] == [
                  %{
-                   "address_hash" => Address.checksum("0x00000000D41867734BBee4C6863D9255b2b06aC1"),
+                   "address_hash" => "0x00000000D41867734BBee4C6863D9255b2b06aC1",
                    "name" => "__CACHE_BREAKER__"
                  }
                ]

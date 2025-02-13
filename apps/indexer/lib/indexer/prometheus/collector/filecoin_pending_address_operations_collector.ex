@@ -13,13 +13,11 @@ defmodule Indexer.Prometheus.Collector.FilecoinPendingAddressOperations do
     alias Prometheus.Model, warn: false
 
     def collect_mf(_registry, callback) do
-      query = PendingAddressOperation.fresh_operations_query()
-
       callback.(
         create_gauge(
           :filecoin_pending_address_operations,
-          "Number of pending address operations that have not been fetched yet",
-          Repo.aggregate(query, :count, timeout: :infinity)
+          "Number of records in filecoin_pending_address_operations table",
+          Repo.aggregate(PendingAddressOperation, :count, timeout: :infinity)
         )
       )
     end

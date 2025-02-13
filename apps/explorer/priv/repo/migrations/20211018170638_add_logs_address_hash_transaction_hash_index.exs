@@ -1,4 +1,4 @@
-defmodule Explorer.Repo.Migrations.CreateLogsAddressHashTransactionHashIndex do
+defmodule Explorer.Repo.Migrations.AddLogsAddressHashTransactionHashIndex do
   use Ecto.Migration
 
   def change do

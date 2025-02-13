@@ -417,7 +417,14 @@ defmodule BlockScoutWeb.AddressChannel do
       when is_list(token_transfers) do
     token_transfer_json =
       TransactionViewAPI.render("token_transfers.json", %{
-        token_transfers: token_transfers,
+        token_transfers:
+          token_transfers
+          |> Repo.preload([
+            [
+              from_address: [:scam_badge, :names, :smart_contract, proxy_implementations_association()],
+              to_address: [:scam_badge, :names, :smart_contract, proxy_implementations_association()]
+            ]
+          ]),
         conn: nil
       })
 

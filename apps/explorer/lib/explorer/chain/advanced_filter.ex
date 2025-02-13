@@ -10,7 +10,6 @@ defmodule Explorer.Chain.AdvancedFilter do
 
   alias Explorer.{Chain, Helper, PagingOptions}
   alias Explorer.Chain.{Address, Data, DenormalizationHelper, Hash, InternalTransaction, TokenTransfer, Transaction}
-  alias Explorer.Chain.Block.Reader.General, as: BlockGeneralReader
 
   @primary_key false
   typed_embedded_schema null: false do
@@ -89,20 +88,8 @@ defmodule Explorer.Chain.AdvancedFilter do
 
     block_numbers_age =
       [
-        from:
-          age[:from] &&
-            BlockGeneralReader.timestamp_to_block_number(
-              age[:from],
-              :after,
-              Keyword.get(options, :api?, false)
-            ),
-        to:
-          age[:to] &&
-            BlockGeneralReader.timestamp_to_block_number(
-              age[:to],
-              :before,
-              Keyword.get(options, :api?, false)
-            )
+        from: age[:from] && Chain.timestamp_to_block_number(age[:from], :after, Keyword.get(options, :api?, false)),
+        to: age[:to] && Chain.timestamp_to_block_number(age[:to], :before, Keyword.get(options, :api?, false))
       ]
 
     tasks =

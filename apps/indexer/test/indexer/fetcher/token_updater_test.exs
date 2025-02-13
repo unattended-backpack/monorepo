@@ -16,7 +16,7 @@ defmodule Indexer.Fetcher.TokenUpdaterTest do
       symbol: nil,
       decimals: 10,
       cataloged: true,
-      metadata_updated_at: DateTime.add(DateTime.utc_now(), -:timer.hours(50), :millisecond)
+      updated_at: DateTime.add(DateTime.utc_now(), -:timer.hours(50), :millisecond)
     )
 
     expect(

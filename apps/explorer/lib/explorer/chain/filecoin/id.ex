@@ -53,7 +53,7 @@ defmodule Explorer.Chain.Filecoin.IDAddress do
        }} ->
         {:ok, %__MODULE__{value: value}}
 
-      _ ->
+      :error ->
         :error
     end
   end
