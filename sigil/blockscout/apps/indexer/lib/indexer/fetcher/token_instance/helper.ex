@@ -3,7 +3,6 @@ defmodule Indexer.Fetcher.TokenInstance.Helper do
     Common functions for Indexer.Fetcher.TokenInstance fetchers
   """
   alias Explorer.Chain
-  alias Explorer.Chain.Token.Instance
   alias Explorer.SmartContract.Reader
   alias Explorer.Token.MetadataRetriever
   alias Indexer.NFTMediaHandler.Queue
@@ -91,11 +90,11 @@ defmodule Indexer.Fetcher.TokenInstance.Helper do
     other = splitted[false] || []
 
     token_types_map =
-      other
-      |> Enum.map(fn {contract_address_hash, _token_id} -> contract_address_hash end)
-      |> Enum.uniq()
-      |> Chain.get_token_types()
-      |> Map.new(fn {hash, type} -> {to_string(hash), type} end)
+      Enum.reduce(other, %{}, fn {contract_address_hash, _token_id}, acc ->
+        address_hash_string = to_string(contract_address_hash)
+
+        Map.put_new(acc, address_hash_string, Chain.get_token_type(contract_address_hash))
+      end)
 
     {results, failed_results, instances_to_retry} =
       other
@@ -166,7 +165,10 @@ defmodule Indexer.Fetcher.TokenInstance.Helper do
         results ++ failed_results
       end
 
-    upsert_with_rescue(total_results)
+    total_results
+    |> Enum.map(fn %{token_id: token_id, token_contract_address_hash: contract_address_hash} = result ->
+      upsert_with_rescue(result, token_id, contract_address_hash)
+    end)
   end
 
   defp add_failed_to_retry_result(results, failed_results, instances_to_retry, contract_address_hash, token_id, result) do
@@ -190,7 +192,7 @@ defmodule Indexer.Fetcher.TokenInstance.Helper do
          contract_address_hash_string = to_string(contract_address_hash)
 
          prepare_request(
-           token_types_map[String.downcase(contract_address_hash_string)],
+           token_types_map[contract_address_hash_string],
            contract_address_hash_string,
            token_id,
            from_base_uri?
@@ -201,7 +203,7 @@ defmodule Indexer.Fetcher.TokenInstance.Helper do
          token_id = prepare_token_id(token_id)
 
          [
-           {result, normalize_token_id(token_types_map[String.downcase(to_string(contract_address_hash))], token_id),
+           {result, normalize_token_id(token_types_map[to_string(contract_address_hash)], token_id),
             contract_address_hash, token_id}
            | acc
          ]
@@ -289,31 +291,26 @@ defmodule Indexer.Fetcher.TokenInstance.Helper do
     }
   end
 
-  defp upsert_with_rescue(insert_params, retrying? \\ false) do
-    insert_params
-    |> Instance.batch_upsert_token_instances()
-    |> Enum.map(&Queue.process_new_instance({:ok, &1}))
+  defp upsert_with_rescue(insert_params, token_id, token_contract_address_hash, retrying? \\ false) do
+    insert_params |> Chain.upsert_token_instance() |> Queue.process_new_instance()
   rescue
     error in Postgrex.Error ->
       if retrying? do
         Logger.warning(
           [
-            "Failed to upsert token instance. Error: #{inspect(error)}, params: #{inspect(insert_params)}"
+            "Failed to upsert token instance: {#{to_string(token_contract_address_hash)}, #{token_id}}, error: #{inspect(error)}"
           ],
           fetcher: :token_instances
         )
 
         nil
       else
-        insert_params
-        |> Enum.map(fn params ->
-          token_instance_map_with_error(
-            params[:token_id],
-            params[:token_contract_address_hash],
-            MetadataRetriever.truncate_error(inspect(error.postgres.code))
-          )
-        end)
-        |> upsert_with_rescue(true)
+        token_id
+        |> token_instance_map_with_error(
+          token_contract_address_hash,
+          MetadataRetriever.truncate_error(inspect(error.postgres.code))
+        )
+        |> upsert_with_rescue(token_id, token_contract_address_hash, true)
       end
   end
 

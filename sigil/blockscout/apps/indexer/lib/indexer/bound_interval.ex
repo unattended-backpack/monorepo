@@ -17,7 +17,6 @@ defmodule Indexer.BoundInterval do
     new_current =
       current
       |> div(2)
-      |> Kernel.-(:timer.seconds(1))
       |> max(minimum)
 
     %__MODULE__{bound_interval | current: new_current}
@@ -25,7 +24,7 @@ defmodule Indexer.BoundInterval do
 
   def increase(%__MODULE__{current: current, maximum: maximum} = bound_interval)
       when is_integer(current) and is_integer(maximum) do
-    new_current = min(current * 2 + :timer.seconds(1), maximum)
+    new_current = min(current * 2, maximum)
 
     %__MODULE__{bound_interval | current: new_current}
   end

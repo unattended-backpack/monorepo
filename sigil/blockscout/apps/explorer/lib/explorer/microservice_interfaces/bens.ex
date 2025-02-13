@@ -154,7 +154,7 @@ defmodule Explorer.MicroserviceInterfaces.BENS do
   end
 
   defp domain_lookup_url do
-    "#{domains_url()}%3Alookup"
+    "#{domains_url()}:lookup"
   end
 
   defp addresses_url do

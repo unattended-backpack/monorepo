@@ -282,12 +282,7 @@ defmodule Explorer.Chain.Import.Runner.Addresses do
   defp filecoin_pending_address_operations(repo, addresses, %{timeout: timeout, timestamps: timestamps}) do
     ordered_addresses =
       addresses
-      |> Enum.map(
-        &%{
-          address_hash: &1.hash,
-          refetch_after: nil
-        }
-      )
+      |> Enum.map(&%{address_hash: &1.hash})
       |> Enum.sort_by(& &1.address_hash)
       |> Enum.dedup_by(& &1.address_hash)
 

@@ -72,7 +72,7 @@ defmodule BlockScoutWeb.API.V2.ZkSyncView do
 
   @doc """
     Extends the json output with a sub-map containing information related
-    zksync: batch number and associated L1 transactions and their timestamps.
+    zksync: batch number and associated L1 transactions and their timestmaps.
 
     ## Parameters
     - `out_json`: a map defining output json which will be extended
@@ -95,7 +95,7 @@ defmodule BlockScoutWeb.API.V2.ZkSyncView do
 
   @doc """
     Extends the json output with a sub-map containing information related
-    zksync: batch number and associated L1 transactions and their timestamps.
+    zksync: batch number and associated L1 transactions and their timestmaps.
 
     ## Parameters
     - `out_json`: a map defining output json which will be extended

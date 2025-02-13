@@ -59,8 +59,7 @@ defmodule BlockScoutWeb.API.V2.TokenTransferControllerTest do
       insert(:token_transfer,
         transaction: transaction,
         token: token,
-        token_type: "ERC-721",
-        token_ids: [1]
+        token_type: "ERC-721"
       )
 
       insert(:token_transfer,
@@ -100,30 +99,19 @@ defmodule BlockScoutWeb.API.V2.TokenTransferControllerTest do
     test "flatten erc1155 batch token transfer", %{conn: conn} do
       transaction = insert(:transaction) |> with_block()
 
-      transfer =
-        insert(:token_transfer,
-          transaction: transaction,
-          block: transaction.block,
-          block_number: transaction.block_number,
-          token_ids: [1, 2, 3],
-          amounts: [500, 600, 700],
-          token_type: "ERC-1155"
-        )
-
-      insert(:token_instance,
-        token_id: 3,
-        token_contract_address_hash: transfer.token_contract_address_hash,
-        metadata: %{test: "test"}
+      insert(:token_transfer,
+        transaction: transaction,
+        block: transaction.block,
+        block_number: transaction.block_number,
+        token_ids: [1, 2, 3],
+        amounts: [500, 600, 700],
+        token_type: "ERC-1155"
       )
 
       request = get(conn, "/api/v2/token-transfers")
       assert response = json_response(request, 200)
       assert Enum.count(response["items"]) == 3
-
-      assert %{"decimals" => "18", "value" => "700", "token_id" => "3", "token_instance" => token_instance} =
-               Enum.at(response["items"], 0)["total"]
-
-      assert token_instance["metadata"] == %{"test" => "test"}
+      assert Enum.at(response["items"], 0)["total"] == %{"decimals" => "18", "value" => "700", "token_id" => "3"}
     end
 
     test "paginates erc1155 batch token transfers", %{conn: conn} do

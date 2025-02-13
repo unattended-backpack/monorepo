@@ -1983,7 +1983,9 @@ defmodule Explorer.Chain.Transaction do
     Repo.replica().aggregate(
       from(
         t in Transaction,
-        where: t.block_number >= ^from and t.block_number <= ^to and t.block_consensus == true
+        inner_join: b in Block,
+        on: b.number == t.block_number and b.consensus == true,
+        where: t.block_number >= ^from and t.block_number <= ^to
       ),
       :count,
       timeout: :infinity

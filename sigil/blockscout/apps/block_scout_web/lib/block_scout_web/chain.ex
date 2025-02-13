@@ -2,10 +2,10 @@ defmodule BlockScoutWeb.Chain do
   @moduledoc """
   Converts the `param` to the corresponding resource that uses that format of param.
   """
-  use Utils.CompileTimeEnvHelper, chain_type: [:explorer, :chain_type]
 
   import Explorer.Chain,
     only: [
+      find_or_insert_address_from_hash: 1,
       hash_to_block: 1,
       hash_to_transaction: 1,
       number_to_block: 1,
@@ -20,7 +20,7 @@ defmodule BlockScoutWeb.Chain do
       page_size: 0
     ]
 
-  import Explorer.Helper, only: [parse_boolean: 1, parse_integer: 1]
+  import Explorer.Helper, only: [parse_integer: 1]
 
   alias BlockScoutWeb.PagingHelper
   alias Ecto.Association.NotLoaded
@@ -52,6 +52,7 @@ defmodule BlockScoutWeb.Chain do
   alias Explorer.Chain.Optimism.FrameSequence, as: OptimismFrameSequence
   alias Explorer.Chain.Optimism.OutputRoot, as: OptimismOutputRoot
   alias Explorer.Chain.Scroll.Bridge, as: ScrollBridge
+
   alias Explorer.PagingOptions
 
   defimpl Poison.Encoder, for: Decimal do
@@ -104,37 +105,10 @@ defmodule BlockScoutWeb.Chain do
   def from_param(param) when byte_size(param) == @full_hash_len,
     do: block_or_transaction_or_operation_or_blob_from_param("0x" <> param)
 
-  if @chain_type == :filecoin do
-    def from_param(string) when is_binary(string) do
-      case param_to_block_number(string) do
-        {:ok, number} ->
-          number_to_block(number)
-
-        _ ->
-          case Search.maybe_parse_filecoin_address(string) do
-            {:ok, filecoin_address} ->
-              result =
-                filecoin_address
-                |> Search.address_by_filecoin_id_or_robust()
-                # credo:disable-for-next-line Credo.Check.Design.AliasUsage
-                |> Explorer.Chain.select_repo(api?: true).one()
-
-              (result && {:ok, result}) || {:error, :not_found}
-
-            _ ->
-              search_ens_domain(string)
-          end
-      end
-    end
-  else
-    def from_param(string) when is_binary(string) do
-      case param_to_block_number(string) do
-        {:ok, number} ->
-          number_to_block(number)
-
-        _ ->
-          search_ens_domain(string)
-      end
+  def from_param(string) when is_binary(string) do
+    case param_to_block_number(string) do
+      {:ok, number} -> number_to_block(number)
+      _ -> search_ens_domain(string)
     end
   end
 
@@ -409,17 +383,6 @@ defmodule BlockScoutWeb.Chain do
     end
   end
 
-  def paging_options(%{"value" => value_string, "id" => id_string})
-      when is_binary(value_string) and is_binary(id_string) do
-    with {id, ""} <- Integer.parse(id_string),
-         {value, ""} <- Decimal.parse(value_string) do
-      [paging_options: %{@default_paging_options | key: {nil, value, id}}]
-    else
-      _ ->
-        [paging_options: @default_paging_options]
-    end
-  end
-
   def paging_options(%{"smart_contract_id" => id_str} = params) do
     transactions_count = parse_integer(params["transaction_count"])
     coin_balance = parse_integer(params["coin_balance"])
@@ -608,7 +571,7 @@ defmodule BlockScoutWeb.Chain do
   defp address_from_param(param) do
     case string_to_address_hash(param) do
       {:ok, hash} ->
-        {:ok, %Address{hash: hash}}
+        find_or_insert_address_from_hash(hash)
 
       :error ->
         {:error, :not_found}
@@ -890,20 +853,4 @@ defmodule BlockScoutWeb.Chain do
         {:error, {:invalid, :number}}
     end
   end
-
-  @doc """
-  Fetches the scam token toggle from conn.cookies["show_scam_tokens"]. And put it to the params keyword.
-
-  ## Parameters
-
-    - params: Initial params to append scam token toggle info.
-    - conn: The connection.
-
-  ## Returns
-
-  Provided params keyword with the new field `show_scam_tokens?`.
-  """
-  @spec fetch_scam_token_toggle(Keyword.t(), Plug.Conn.t()) :: Keyword.t()
-  def fetch_scam_token_toggle(params, conn),
-    do: Keyword.put(params, :show_scam_tokens?, conn.cookies["show_scam_tokens"] |> parse_boolean())
 end

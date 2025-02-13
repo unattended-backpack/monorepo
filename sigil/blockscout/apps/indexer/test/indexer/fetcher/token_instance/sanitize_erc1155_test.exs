@@ -3,6 +3,7 @@ defmodule Indexer.Fetcher.TokenInstance.SanitizeERC1155Test do
 
   alias Explorer.Repo
   alias Explorer.Chain.Token.Instance
+  alias EthereumJSONRPC.Encoder
 
   describe "sanitizer test" do
     test "imports token instances" do
@@ -20,7 +21,6 @@ defmodule Indexer.Fetcher.TokenInstance.SanitizeERC1155Test do
       assert [] = Repo.all(Instance)
 
       start_supervised!({Indexer.Fetcher.TokenInstance.SanitizeERC1155, []})
-      start_supervised!({Indexer.Fetcher.TokenInstance.Sanitize.Supervisor, [[flush_interval: 1]]})
 
       :timer.sleep(500)
 

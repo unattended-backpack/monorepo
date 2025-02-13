@@ -481,9 +481,7 @@ defmodule Indexer.Helper do
          retries_left,
          retries_done
        ) do
-    requests
-    |> json_rpc(json_rpc_named_arguments)
-    |> case do
+    case json_rpc(requests, json_rpc_named_arguments) do
       {:ok, responses_list} = batch_responses ->
         standardized_error =
           Enum.reduce_while(responses_list, %{}, fn one_response, acc ->
@@ -503,6 +501,7 @@ defmodule Indexer.Helper do
         {:error, message, err}
     end
     |> case do
+      # credo:disable-for-previous-line Credo.Check.Refactor.PipeChainStart
       {:ok, responses, _} ->
         responses
 

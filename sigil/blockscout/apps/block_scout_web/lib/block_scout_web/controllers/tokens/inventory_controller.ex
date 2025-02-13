@@ -4,7 +4,6 @@ defmodule BlockScoutWeb.Tokens.InventoryController do
   alias BlockScoutWeb.AccessHelper
   alias BlockScoutWeb.Tokens.{HolderController, InventoryView}
   alias Explorer.Chain
-  alias Explorer.Chain.Token.Instance
   alias Phoenix.View
 
   import BlockScoutWeb.Chain,
@@ -19,7 +18,7 @@ defmodule BlockScoutWeb.Tokens.InventoryController do
          {:ok, token} <- Chain.token_from_address_hash(address_hash),
          {:ok, false} <- AccessHelper.restricted_access?(address_hash_string, params) do
       unique_token_instances =
-        Instance.address_to_unique_tokens(
+        Chain.address_to_unique_tokens(
           token.contract_address_hash,
           token,
           unique_tokens_paging_options(params)

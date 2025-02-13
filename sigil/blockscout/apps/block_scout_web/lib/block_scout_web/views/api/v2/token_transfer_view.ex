@@ -71,31 +71,20 @@ defmodule BlockScoutWeb.API.V2.TokenTransferView do
   def prepare_token_transfer_total(token_transfer) do
     case TokensHelper.token_transfer_amount_for_api(token_transfer) do
       {:ok, :erc721_instance} ->
-        %{
-          "token_id" => token_transfer.token_ids && List.first(token_transfer.token_ids),
-          "token_instance" =>
-            token_transfer.token_instance &&
-              TokenView.prepare_token_instance(token_transfer.token_instance, token_transfer.token)
-        }
+        %{"token_id" => token_transfer.token_ids && List.first(token_transfer.token_ids)}
 
       {:ok, :erc1155_erc404_instance, value, decimals} ->
         %{
           "token_id" => token_transfer.token_ids && List.first(token_transfer.token_ids),
           "value" => value,
-          "decimals" => decimals,
-          "token_instance" =>
-            token_transfer.token_instance &&
-              TokenView.prepare_token_instance(token_transfer.token_instance, token_transfer.token)
+          "decimals" => decimals
         }
 
       {:ok, :erc1155_erc404_instance, values, token_ids, decimals} ->
         %{
           "token_id" => token_ids && List.first(token_ids),
           "value" => values && List.first(values),
-          "decimals" => decimals,
-          "token_instance" =>
-            token_transfer.token_instance &&
-              TokenView.prepare_token_instance(token_transfer.token_instance, token_transfer.token)
+          "decimals" => decimals
         }
 
       {:ok, value, decimals} ->

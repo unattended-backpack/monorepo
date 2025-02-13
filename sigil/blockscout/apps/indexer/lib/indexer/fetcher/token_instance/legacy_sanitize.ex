@@ -1,8 +1,7 @@
-defmodule Indexer.Fetcher.TokenInstance.SanitizeERC1155 do
+defmodule Indexer.Fetcher.TokenInstance.LegacySanitize do
   @moduledoc """
     This fetcher is stands for creating token instances which wasn't inserted yet and index meta for them.
-
-    !!!Imports only ERC-1155 token instances!!!
+    Legacy is because now we token instances inserted on block import and this fetcher is only for historical and unfetched for some reasons data
   """
 
   use GenServer, restart: :transient
@@ -29,7 +28,7 @@ defmodule Indexer.Fetcher.TokenInstance.SanitizeERC1155 do
   def handle_cast(:backfill, %{concurrency: concurrency, batch_size: batch_size} = state) do
     instances_to_fetch =
       (concurrency * batch_size)
-      |> Instance.not_inserted_erc_1155_token_instances()
+      |> Instance.not_inserted_token_instances_query()
       |> Repo.all()
 
     if Enum.empty?(instances_to_fetch) do
