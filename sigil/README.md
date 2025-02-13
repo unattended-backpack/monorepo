@@ -102,11 +102,25 @@ openssl rand -hex 32 > jwt.txt
   --private-key=$GS_BATCHER_PRIVATE_KEY
 ```
 
+# /blockscout
+
+original repo: <https://github.com/blockscout/blockscout>
+forked version tag: `v6.10.2`
+
+Our block explorer.  We run blockscout with an exernal database managed by
+Digital Ocean.
+
 # Maintaining
 
 The repos in this folder were dragged in via `git subtree`, a less burdensome
 alternative to git submodules.  See below for how to change versions of these
 dependencies.  All commands are run from the repository root `monorepo/`.
+
+Example: add new repository `blockscout` as a subtree
+
+```
+git subtree add --prefix=sigil/blockscout https://github.com/blockscout/blockscout.git master --squash
+```
 
 Example: changing version of `optimism` to the release tag `v99.99.99`.
 
