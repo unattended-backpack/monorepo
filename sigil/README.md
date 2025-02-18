@@ -102,11 +102,71 @@ openssl rand -hex 32 > jwt.txt
   --private-key=$GS_BATCHER_PRIVATE_KEY
 ```
 
+# /blockscout
+
+original repo: <https://github.com/blockscout/blockscout>
+forked version tag: `v6.10.2`
+
+Our block explorer.  We run blockscout with an external database managed by
+Digital Ocean.  Before running, a number of environment vars need to be filled in:
+
+```.env
+# blockscout/docker-compose/envs/common-blockscout.env
+ETHEREUM_JSONRPC_HTTP_URL=
+DATABASE_URL=
+ETHEREUM_JSONRPC_TRACE_URL=
+
+# blockscout/docker-compose/envs/common-frontend.env
+NEXT_PUBLIC_API_HOST=
+NEXT_PUBLIC_APP_HOST=
+
+# blockscout/docker-compose/envs/common-nft-media-handler.env
+NFT_MEDIA_HANDLER_AWS_ACCESS_KEY_ID=
+NFT_MEDIA_HANDLER_AWS_SECRET_ACCESS_KEY=
+NFT_MEDIA_HANDLER_AWS_BUCKET_HOST
+NFT_MEDIA_HANDLER_AWS_PUBLIC_BUCKET_URL=
+NFT_MEDIA_HANDLER_AWS_BUCKET_NAME
+
+# blockscout/docker-compose/envs/common-user-ops-indexer.env
+USER_OPS_INDEXER__INDEXER__RPC_URL=""
+USER_OPS_INDEXER__DATABASE__CONNECT__URL=""
+```
+
+Additionally, you must give write permission for all users to the file
+`blockscout/docker-compose/services/dets/`, and create it first if it doesn't
+already exist.  This a workaround for an issue that was fixed in [this
+pr](https://github.com/blockscout/blockscout/pull/1165), but as of writing this, has
+not yet propagated to the image that is pulled when running blockscout with docker
+compose.
+
+```bash
+root@blockscout-server:~/monorepo/sigil/blockscout/docker-compose/services $ mkdir dets
+root@blockscout-server:~/monorepo/sigil/blockscout/docker-compose/services $ chmod 777 dets
+```
+
+## running blockscout
+
+```
+root@blockscout-server:~/monorepo/sigil/blockscout/docker-compose $ docker compose -f external-db.yml up -d
+```
+
+## stopping blockscout
+
+```
+root@blockscout-server:~/monorepo/sigil/blockscout/docker-compose $ docker compose -f external-db.yml down
+```
+
 # Maintaining
 
 The repos in this folder were dragged in via `git subtree`, a less burdensome
 alternative to git submodules.  See below for how to change versions of these
 dependencies.  All commands are run from the repository root `monorepo/`.
+
+Example: add new repository `blockscout` as a subtree
+
+```
+git subtree add --prefix=sigil/blockscout https://github.com/blockscout/blockscout.git master --squash
+```
 
 Example: changing version of `optimism` to the release tag `v99.99.99`.
 
