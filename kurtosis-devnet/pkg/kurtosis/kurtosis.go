@@ -6,7 +6,8 @@ import (
 	"fmt"
 	"io"
 
-	"github.com/ethereum-optimism/optimism/kurtosis-devnet/pkg/descriptors"
+	"github.com/ethereum-optimism/optimism/devnet-sdk/descriptors"
+	"github.com/ethereum-optimism/optimism/devnet-sdk/types"
 	apiInterfaces "github.com/ethereum-optimism/optimism/kurtosis-devnet/pkg/kurtosis/api/interfaces"
 	"github.com/ethereum-optimism/optimism/kurtosis-devnet/pkg/kurtosis/api/run"
 	"github.com/ethereum-optimism/optimism/kurtosis-devnet/pkg/kurtosis/api/wrappers"
@@ -135,14 +136,14 @@ func (d *KurtosisDeployer) getWallets(wallets deployer.WalletList) descriptors.W
 	walletMap := make(descriptors.WalletMap)
 	for _, wallet := range wallets {
 		walletMap[wallet.Name] = descriptors.Wallet{
-			Address:    wallet.Address,
+			Address:    types.Address(wallet.Address),
 			PrivateKey: wallet.PrivateKey,
 		}
 	}
 	return walletMap
 }
 
-// getEnvironmentInfo parses the input spec and inspect output to create KurtosisEnvironment
+// GetEnvironmentInfo parses the input spec and inspect output to create KurtosisEnvironment
 func (d *KurtosisDeployer) GetEnvironmentInfo(ctx context.Context, spec *spec.EnclaveSpec) (*KurtosisEnvironment, error) {
 	inspectResult, err := d.enclaveInspecter.EnclaveInspect(ctx, d.enclave)
 	if err != nil {
@@ -163,7 +164,8 @@ func (d *KurtosisDeployer) GetEnvironmentInfo(ctx context.Context, spec *spec.En
 
 	env := &KurtosisEnvironment{
 		DevnetEnvironment: descriptors.DevnetEnvironment{
-			L2: make([]*descriptors.Chain, 0, len(spec.Chains)),
+			L2:       make([]*descriptors.Chain, 0, len(spec.Chains)),
+			Features: spec.Features,
 		},
 	}
 

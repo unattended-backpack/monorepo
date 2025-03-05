@@ -141,6 +141,16 @@ func (s *RetryingL2Source) CodeByHash(ctx context.Context, hash common.Hash) ([]
 	})
 }
 
+func (s *RetryingL2Source) FetchReceipts(ctx context.Context, blockHash common.Hash) (eth.BlockInfo, types.Receipts, error) {
+	return retry.Do2(ctx, maxAttempts, s.strategy, func() (eth.BlockInfo, types.Receipts, error) {
+		i, r, err := s.source.FetchReceipts(ctx, blockHash)
+		if err != nil {
+			s.logger.Warn("Failed to fetch receipts", "hash", blockHash, "err", err)
+		}
+		return i, r, err
+	})
+}
+
 func (s *RetryingL2Source) OutputByRoot(ctx context.Context, blockRoot common.Hash) (eth.Output, error) {
 	return retry.Do(ctx, maxAttempts, s.strategy, func() (eth.Output, error) {
 		o, err := s.source.OutputByRoot(ctx, blockRoot)
@@ -161,6 +171,16 @@ func (s *RetryingL2Source) OutputByNumber(ctx context.Context, blockNum uint64) 
 		}
 		return o, nil
 	})
+}
+
+func (s *RetryingL2Source) GetProof(ctx context.Context, address common.Address, storage []common.Hash, blockTag string) (*eth.AccountResult, error) {
+	// these aren't retried because they are currently experimental and can be slow
+	return s.source.GetProof(ctx, address, storage, blockTag)
+}
+
+func (s *RetryingL2Source) PayloadExecutionWitness(ctx context.Context, parentHash common.Hash, payloadAttributes eth.PayloadAttributes) (*eth.ExecutionWitness, error) {
+	// these aren't retried because they are currently experimental and can be slow
+	return s.source.PayloadExecutionWitness(ctx, parentHash, payloadAttributes)
 }
 
 func NewRetryingL2Source(logger log.Logger, source hosttypes.L2Source) *RetryingL2Source {

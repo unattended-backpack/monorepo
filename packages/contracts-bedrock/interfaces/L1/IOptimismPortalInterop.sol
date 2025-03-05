@@ -10,7 +10,6 @@ import { ISuperchainConfig } from "interfaces/L1/ISuperchainConfig.sol";
 import { ConfigType } from "interfaces/L2/IL1BlockInterop.sol";
 
 interface IOptimismPortalInterop {
-    error CustomGasTokenNotSupported();
     error AlreadyFinalized();
     error BadTarget();
     error Blacklisted();
@@ -33,6 +32,7 @@ interface IOptimismPortalInterop {
     error UnexpectedList();
     error UnexpectedString();
     error Unproven();
+    error LegacyGame();
 
     event DisputeGameBlacklisted(IDisputeGame indexed disputeGame);
     event Initialized(uint8 version);

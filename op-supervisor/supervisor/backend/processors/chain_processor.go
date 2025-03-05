@@ -29,8 +29,9 @@ type LogProcessor interface {
 }
 
 type DatabaseRewinder interface {
-	Rewind(chain types.ChainID, headBlockNum uint64) error
-	LatestBlockNum(chain types.ChainID) (num uint64, ok bool)
+	Rewind(chain eth.ChainID, headBlock eth.BlockID) error
+	LatestBlockNum(chain eth.ChainID) (num uint64, ok bool)
+	AcceptedBlock(chainID eth.ChainID, id eth.BlockID) error
 }
 
 type BlockProcessorFn func(ctx context.Context, block eth.BlockRef) error
@@ -44,10 +45,13 @@ func (fn BlockProcessorFn) ProcessBlock(ctx context.Context, block eth.BlockRef)
 type ChainProcessor struct {
 	log log.Logger
 
-	client     Source
-	clientLock sync.Mutex
+	clients      []Source
+	activeClient Source
+	clientIndex  int
+	clientsTried int
+	clientLock   sync.Mutex
 
-	chain types.ChainID
+	chain eth.ChainID
 
 	systemContext context.Context
 
@@ -62,11 +66,10 @@ type ChainProcessor struct {
 var _ event.AttachEmitter = (*ChainProcessor)(nil)
 var _ event.Deriver = (*ChainProcessor)(nil)
 
-func NewChainProcessor(systemContext context.Context, log log.Logger, chain types.ChainID, processor LogProcessor, rewinder DatabaseRewinder) *ChainProcessor {
+func NewChainProcessor(systemContext context.Context, log log.Logger, chain eth.ChainID, processor LogProcessor, rewinder DatabaseRewinder) *ChainProcessor {
 	out := &ChainProcessor{
 		systemContext:     systemContext,
 		log:               log.New("chain", chain),
-		client:            nil,
 		chain:             chain,
 		processor:         processor,
 		rewinder:          rewinder,
@@ -79,10 +82,13 @@ func (s *ChainProcessor) AttachEmitter(em event.Emitter) {
 	s.emitter = em
 }
 
-func (s *ChainProcessor) SetSource(cl Source) {
+func (s *ChainProcessor) AddSource(cl Source) {
 	s.clientLock.Lock()
 	defer s.clientLock.Unlock()
-	s.client = cl
+	s.clients = append(s.clients, cl)
+	if s.activeClient == nil {
+		s.activeClient = s.clients[0]
+	}
 }
 
 func (s *ChainProcessor) nextNum() uint64 {
@@ -107,7 +113,7 @@ func (s *ChainProcessor) OnEvent(ev event.Event) bool {
 }
 
 func (s *ChainProcessor) onRequest(target uint64) {
-	_, err := s.rangeUpdate(target)
+	processed, err := s.rangeUpdate(target)
 	if err != nil {
 		if errors.Is(err, ethereum.NotFound) {
 			s.log.Debug("Event-indexer cannot find next block yet", "target", target, "err", err)
@@ -116,21 +122,51 @@ func (s *ChainProcessor) onRequest(target uint64) {
 		} else {
 			s.log.Error("Failed to process new block", "err", err)
 		}
+		// if the client failed to get *any* blocks, it probably isn't the source of this sync request
+		// so we should try the next client. Clients will be tried in round-robin order until one succeeds.
+		if processed == 0 {
+			if s.clientsTried < len(s.clients) {
+				s.log.Debug("Active client found no blocks, trying again with next client", "activeClient", s.activeClient)
+				s.nextActiveClient()
+				s.emitter.Emit(superevents.ChainProcessEvent{
+					ChainID: s.chain,
+					Target:  target,
+				})
+			} else {
+				s.log.Debug("All clients failed to process blocks", "target", target)
+				s.clientsTried = 0 // reset the counter
+			}
+		}
 	} else if x := s.nextNum(); x <= target {
+		s.clientsTried = 0 // reset the counter
 		s.log.Debug("Continuing with next block", "target", target, "next", x)
 		s.emitter.Emit(superevents.ChainProcessEvent{
 			ChainID: s.chain,
 			Target:  target,
 		}) // instantly continue processing, no need to idle
 	} else {
+		s.clientsTried = 0 // reset the counter
 		s.log.Debug("Idling block-processing, reached latest block", "head", target)
 	}
+}
+
+// nextActiveClient advances the client index and sets the active client.
+func (s *ChainProcessor) nextActiveClient() {
+	s.clientLock.Lock()
+	defer s.clientLock.Unlock()
+	if len(s.clients) == 0 {
+		return
+	}
+	s.clientIndex = (s.clientIndex + 1) % len(s.clients)
+	s.activeClient = s.clients[s.clientIndex]
+	// track that we have advanced the client index
+	s.clientsTried++
 }
 
 func (s *ChainProcessor) rangeUpdate(target uint64) (int, error) {
 	s.clientLock.Lock()
 	defer s.clientLock.Unlock()
-	if s.client == nil {
+	if len(s.clients) == 0 {
 		return 0, types.ErrNoRPCSource
 	}
 
@@ -174,23 +210,22 @@ func (s *ChainProcessor) rangeUpdate(target uint64) (int, error) {
 
 		// fetch the block ref
 		ctx, cancel := context.WithTimeout(s.systemContext, time.Second*10)
-		nextL1, err := s.client.BlockRefByNumber(ctx, num)
+		next, err := s.activeClient.BlockRefByNumber(ctx, num)
 		cancel()
 		if err != nil {
 			result.err = err
 			return
 		}
-		next := eth.BlockRef{
-			Hash:       nextL1.Hash,
-			ParentHash: nextL1.ParentHash,
-			Number:     nextL1.Number,
-			Time:       nextL1.Time,
+		if err := s.rewinder.AcceptedBlock(s.chain, next.ID()); err != nil {
+			s.log.Warn("Cannot accept next block into events DB", "err", err)
+			result.err = err
+			return
 		}
 		result.blockRef = &next
 
 		// fetch receipts
 		ctx, cancel = context.WithTimeout(s.systemContext, time.Second*10)
-		receipts, err := s.client.FetchReceipts(ctx, next.Hash)
+		receipts, err := s.activeClient.FetchReceipts(ctx, next.Hash)
 		cancel()
 		if err != nil {
 			result.err = err
@@ -247,7 +282,7 @@ func (s *ChainProcessor) process(ctx context.Context, next eth.BlockRef, receipt
 		}
 
 		// Try to rewind the database to the previous block to remove any logs from this block that were written
-		if err := s.rewinder.Rewind(s.chain, next.Number-1); err != nil {
+		if err := s.rewinder.Rewind(s.chain, next.ParentID()); err != nil {
 			// If any logs were written, our next attempt to write will fail and we'll retry this rewind.
 			// If no logs were written successfully then the rewind wouldn't have done anything anyway.
 			s.log.Error("Failed to rewind after error processing block", "block", next, "err", err)

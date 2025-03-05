@@ -134,7 +134,7 @@ func CreateL2(logger log.Logger, fa *foundry.ArtifactsFS, srcFS *foundry.SourceM
 	return l2Host
 }
 
-// prepareInitialL1 deploys basics such as preinstalls to L1  (incl. EIP-4788)
+// PrepareInitialL1 deploys basics such as preinstalls to L1  (incl. EIP-4788)
 func PrepareInitialL1(l1Host *script.Host, cfg *L1Config) (*L1Deployment, error) {
 	l1Host.SetTxOrigin(sysGenesisDeployer)
 
@@ -171,6 +171,7 @@ func DeploySuperchainToL1(l1Host *script.Host, superCfg *SuperchainConfig) (*Sup
 		L1ContractsRelease:              superCfg.Implementations.L1ContractsRelease,
 		SuperchainConfigProxy:           superDeployment.SuperchainConfigProxy,
 		ProtocolVersionsProxy:           superDeployment.ProtocolVersionsProxy,
+		UpgradeController:               superCfg.ProxyAdminOwner,
 		UseInterop:                      superCfg.Implementations.UseInterop,
 	})
 	if err != nil {
@@ -319,12 +320,17 @@ func CompleteL2(l2Host *script.Host, cfg *L2Config, l1Block *types.Block, deploy
 		allocs.Accounts[addr] = acc
 	}
 
-	l2Genesis.Alloc = allocs.Accounts
+	for addr, account := range allocs.Accounts {
+		l2Genesis.Alloc[addr] = account
+	}
 	l2GenesisBlock := l2Genesis.ToBlock()
 
 	rollupCfg, err := deployCfg.RollupConfig(l1Block.Header(), l2GenesisBlock.Hash(), l2GenesisBlock.NumberU64())
 	if err != nil {
 		return nil, fmt.Errorf("failed to build L2 rollup config: %w", err)
+	}
+	if cfg.OverrideMessageExpiryTime != 0 {
+		rollupCfg.OverrideMessageExpiryTimeInterop = cfg.OverrideMessageExpiryTime
 	}
 	return &L2Output{
 		Genesis:   l2Genesis,

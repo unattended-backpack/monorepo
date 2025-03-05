@@ -233,6 +233,9 @@ func TestRetryingL2Source(t *testing.T) {
 	txs := types.Transactions{
 		&types.Transaction{},
 	}
+	rcpts := types.Receipts{
+		&types.Receipt{},
+	}
 	data := []byte{1, 2, 3, 4, 5}
 	output := &eth.OutputV0{}
 	wrongOutput := &eth.OutputV0{BlockHash: common.Hash{0x99}}
@@ -305,6 +308,17 @@ func TestRetryingL2Source(t *testing.T) {
 		require.Equal(t, data, actual)
 	})
 
+	t.Run("FetchReceipts Success", func(t *testing.T) {
+		source, mock := createL2Source(t)
+		defer mock.AssertExpectations(t)
+		mock.ExpectFetchReceipts(hash, info, rcpts, nil)
+
+		actualInfo, actualRcpts, err := source.FetchReceipts(ctx, hash)
+		require.NoError(t, err)
+		require.Equal(t, info, actualInfo)
+		require.Equal(t, rcpts, actualRcpts)
+	})
+
 	t.Run("OutputByRoot Success", func(t *testing.T) {
 		source, mock := createL2Source(t)
 		defer mock.AssertExpectations(t)
@@ -373,6 +387,15 @@ func (m *MockL2Source) RollupConfig() *rollup.Config {
 	return out[0].(*rollup.Config)
 }
 
+func (m *MockL2Source) PayloadExecutionWitness(ctx context.Context, parentHash common.Hash, payloadAttributes eth.PayloadAttributes) (*eth.ExecutionWitness, error) {
+	out := m.Mock.MethodCalled("PayloadExecutionWitness", parentHash, payloadAttributes)
+	return out[0].(*eth.ExecutionWitness), *out[1].(*error)
+}
+func (m *MockL2Source) GetProof(ctx context.Context, address common.Address, storage []common.Hash, blockTag string) (*eth.AccountResult, error) {
+	out := m.Mock.MethodCalled("GetProof", address, storage, blockTag)
+	return out[0].(*eth.AccountResult), *out[1].(*error)
+}
+
 func (m *MockL2Source) InfoAndTxsByHash(ctx context.Context, blockHash common.Hash) (eth.BlockInfo, types.Transactions, error) {
 	out := m.Mock.MethodCalled("InfoAndTxsByHash", blockHash)
 	return out[0].(eth.BlockInfo), out[1].(types.Transactions), *out[2].(*error)
@@ -386,6 +409,11 @@ func (m *MockL2Source) NodeByHash(ctx context.Context, hash common.Hash) ([]byte
 func (m *MockL2Source) CodeByHash(ctx context.Context, hash common.Hash) ([]byte, error) {
 	out := m.Mock.MethodCalled("CodeByHash", hash)
 	return out[0].([]byte), *out[1].(*error)
+}
+
+func (m *MockL2Source) FetchReceipts(ctx context.Context, blockHash common.Hash) (eth.BlockInfo, types.Receipts, error) {
+	out := m.Mock.MethodCalled("FetchReceipts", blockHash)
+	return out[0].(eth.BlockInfo), out[1].(types.Receipts), *out[2].(*error)
 }
 
 func (m *MockL2Source) OutputByRoot(ctx context.Context, blockRoot common.Hash) (eth.Output, error) {
@@ -408,6 +436,10 @@ func (m *MockL2Source) ExpectNodeByHash(hash common.Hash, node []byte, err error
 
 func (m *MockL2Source) ExpectCodeByHash(hash common.Hash, code []byte, err error) {
 	m.Mock.On("CodeByHash", hash).Once().Return(code, &err)
+}
+
+func (m *MockL2Source) ExpectFetchReceipts(blockHash common.Hash, info eth.BlockInfo, rcpts types.Receipts, err error) {
+	m.Mock.On("FetchReceipts", blockHash).Once().Return(info, rcpts, &err)
 }
 
 func (m *MockL2Source) ExpectOutputByRoot(blockHash common.Hash, output eth.Output, err error) {
