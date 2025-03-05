@@ -42,7 +42,6 @@ async fn main() -> Result<()> {
 
     // Set up the SP1 SDK logger.
     utils::setup_logger();
-
     dotenv::dotenv().ok();
 
     let prover_client = Arc::new(ProverClient::builder().cuda().build());
@@ -59,6 +58,12 @@ async fn main() -> Result<()> {
     let rollup_config_hash = hash_rollup_config(fetcher.rollup_config.as_ref().unwrap());
 
     let proof_store = Arc::new(RwLock::new(HashMap::new()));
+
+    // Set the aggregation proof type based on environment variable. Default to groth16.
+    let agg_proof_mode = match env::var("AGG_PROOF_MODE") {
+        Ok(proof_type) if proof_type.to_lowercase() == "plonk" => SP1ProofMode::Plonk,
+        _ => SP1ProofMode::Groth16,
+    };
 
     // Initialize global hashes.
     let global_hashes = SuccinctProposerConfig {
@@ -137,10 +142,11 @@ async fn request_span_proof(
         }
     };
 
-    let host_cli = match fetcher
-        .get_host_cli_args(
+    let host_args = match fetcher
+        .get_host_args(
             payload.start,
             payload.end,
+            None,
             ProgramType::Multi,
             CacheMode::DeleteCache,
         )
@@ -156,27 +162,9 @@ async fn request_span_proof(
         }
     };
 
-    // Start the server and native client with a timeout.
-    // Note: Ideally, the server should call out to a separate process that executes the native
-    // host, and return an ID that the client can poll on to check if the proof was submitted.
-    let mut witnessgen_executor = WitnessGenExecutor::new(WITNESSGEN_TIMEOUT, RunContext::Docker);
-    if let Err(e) = witnessgen_executor.spawn_witnessgen(&host_cli).await {
-        error!("Failed to spawn witness generation: {}", e);
-        return Err(AppError(anyhow::anyhow!(
-            "Failed to spawn witness generation: {}",
-            e
-        )));
-    }
-    // Log any errors from running the witness generation process.
-    if let Err(e) = witnessgen_executor.flush().await {
-        error!("Failed to generate witness: {}", e);
-        return Err(AppError(anyhow::anyhow!(
-            "Failed to generate witness: {}",
-            e
-        )));
-    }
+    let mem_kv_store = start_server_and_native_client(host_args).await?;
 
-    let sp1_stdin = match get_proof_stdin(&host_cli) {
+    let sp1_stdin = match get_proof_stdin(mem_kv_store) {
         Ok(stdin) => stdin,
         Err(e) => {
             error!("Failed to get proof stdin: {}", e);
@@ -231,7 +219,10 @@ async fn request_agg_proof(
 
     let fetcher = match OPSuccinctDataFetcher::new_with_rollup_config(RunContext::Docker).await {
         Ok(f) => f,
-        Err(e) => return Err(AppError(anyhow::anyhow!("Failed to create fetcher: {}", e))),
+        Err(e) => {
+            error!("Failed to create fetcher: {}", e);
+            return Err(AppError(anyhow::anyhow!("Failed to create fetcher: {}", e)));
+        }
     };
 
     let headers = match fetcher
@@ -286,10 +277,11 @@ async fn request_mock_span_proof(
         }
     };
 
-    let host_cli = match fetcher
-        .get_host_cli_args(
+    let host_args = match fetcher
+        .get_host_args(
             payload.start,
             payload.end,
+            None,
             ProgramType::Multi,
             CacheMode::DeleteCache,
         )
@@ -319,7 +311,7 @@ async fn request_mock_span_proof(
         )));
     }
 
-    let sp1_stdin = match get_proof_stdin(&host_cli) {
+    let sp1_stdin = match get_proof_stdin(oracle) {
         Ok(stdin) => stdin,
         Err(e) => {
             error!("Failed to get proof stdin: {}", e);
@@ -400,8 +392,6 @@ async fn request_mock_agg_proof(
         }
     };
 
-    let prover = ProverClient::builder().mock().build();
-
     let stdin =
         match get_agg_proof_stdin(proofs, boot_infos, headers, &state.range_vk, l1_head.into()) {
             Ok(s) => s,
@@ -414,7 +404,7 @@ async fn request_mock_agg_proof(
     // Simulate the mock proof. proof.bytes() returns an empty byte array for mock proofs.
     let proof = match prover
         .prove(&state.agg_pk, &stdin)
-        .groth16()
+        .mode(state.agg_proof_mode)
         .deferred_proof_verification(false)
         .run()
     {

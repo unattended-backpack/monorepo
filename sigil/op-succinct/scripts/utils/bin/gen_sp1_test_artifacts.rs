@@ -5,9 +5,7 @@ use log::info;
 use op_succinct_host_utils::{
     block_range::{get_validated_block_range, split_range_basic},
     fetcher::{CacheMode, OPSuccinctDataFetcher, RunContext},
-    get_proof_stdin,
-    witnessgen::run_native_data_generation,
-    ProgramType,
+    get_proof_stdin, start_server_and_native_client, ProgramType,
 };
 use op_succinct_scripts::HostExecutorArgs;
 use sp1_sdk::utils;
@@ -45,10 +43,10 @@ async fn main() -> Result<()> {
     };
 
     // Get the host CLIs in order, in parallel.
-    let host_clis = futures::stream::iter(split_ranges.iter())
+    let host_args = futures::stream::iter(split_ranges.iter())
         .map(|range| async {
             data_fetcher
-                .get_host_cli_args(range.start, range.end, ProgramType::Multi, cache_mode)
+                .get_host_args(range.start, range.end, None, ProgramType::Multi, cache_mode)
                 .await
                 .expect("Failed to get host CLI args")
         })
@@ -56,18 +54,14 @@ async fn main() -> Result<()> {
         .collect::<Vec<_>>()
         .await;
 
-    if !args.use_cache {
-        // Get the host CLI args
-        run_native_data_generation(&host_clis).await;
+    let mut successful_ranges = Vec::new();
+    for (range, host_args) in split_ranges.iter().zip(host_args.iter()) {
+        let oracle = start_server_and_native_client(host_args.clone())
+            .await
+            .unwrap();
+        let sp1_stdin = get_proof_stdin(oracle).unwrap();
+        successful_ranges.push((sp1_stdin, range.clone()));
     }
-
-    let successful_ranges = split_ranges
-        .iter()
-        .zip(host_clis.iter())
-        .map(|(range, host_cli)| {
-            let sp1_stdin = get_proof_stdin(host_cli).unwrap();
-            (sp1_stdin, range)
-        });
 
     // Now, write the successful ranges to /sp1-testing-suite-artifacts/op-succinct-chain-{l2_chain_id}-{start}-{end}
     // The folders should each have the RANGE_ELF as program.bin, and the serialized stdin should be
