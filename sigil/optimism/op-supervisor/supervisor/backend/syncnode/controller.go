@@ -1,16 +1,15 @@
 package syncnode
 
 import (
-	"context"
 	"fmt"
 	"sync/atomic"
 
+	"github.com/ethereum-optimism/optimism/op-service/eth"
 	"github.com/ethereum/go-ethereum/log"
 
 	"github.com/ethereum-optimism/optimism/op-node/rollup/event"
 	"github.com/ethereum-optimism/optimism/op-service/locks"
 	"github.com/ethereum-optimism/optimism/op-supervisor/supervisor/backend/depset"
-	"github.com/ethereum-optimism/optimism/op-supervisor/supervisor/backend/superevents"
 	"github.com/ethereum-optimism/optimism/op-supervisor/supervisor/types"
 )
 
@@ -21,7 +20,7 @@ type SyncNodesController struct {
 	logger log.Logger
 
 	id          atomic.Uint64
-	controllers locks.RWMap[types.ChainID, *locks.RWMap[*ManagedNode, struct{}]]
+	controllers locks.RWMap[eth.ChainID, *locks.RWMap[*ManagedNode, struct{}]]
 
 	eventSys event.System
 
@@ -53,7 +52,7 @@ func (snc *SyncNodesController) OnEvent(ev event.Event) bool {
 }
 
 func (snc *SyncNodesController) Close() error {
-	snc.controllers.Range(func(chainID types.ChainID, controllers *locks.RWMap[*ManagedNode, struct{}]) bool {
+	snc.controllers.Range(func(chainID eth.ChainID, controllers *locks.RWMap[*ManagedNode, struct{}]) bool {
 		controllers.Range(func(node *ManagedNode, _ struct{}) bool {
 			node.Close()
 			return true
@@ -65,7 +64,7 @@ func (snc *SyncNodesController) Close() error {
 
 // AttachNodeController attaches a node to be managed by the supervisor.
 // If noSubscribe, the node is not actively polled/subscribed to, and requires manual ManagedNode.PullEvents calls.
-func (snc *SyncNodesController) AttachNodeController(chainID types.ChainID, ctrl SyncControl, noSubscribe bool) (Node, error) {
+func (snc *SyncNodesController) AttachNodeController(chainID eth.ChainID, ctrl SyncControl, noSubscribe bool) (Node, error) {
 	if !snc.depSet.HasChain(chainID) {
 		return nil, fmt.Errorf("chain %v not in dependency set: %w", chainID, types.ErrUnknownChain)
 	}
@@ -74,21 +73,17 @@ func (snc *SyncNodesController) AttachNodeController(chainID types.ChainID, ctrl
 		return &locks.RWMap[*ManagedNode, struct{}]{}
 	})
 	controllersForChain, _ := snc.controllers.Get(chainID)
-	node := NewManagedNode(snc.logger, chainID, ctrl, snc.backend, noSubscribe)
 
 	nodeID := snc.id.Add(1)
 	name := fmt.Sprintf("syncnode-%s-%d", chainID, nodeID)
-	snc.eventSys.Register(name, node, event.DefaultRegisterOpts())
+	logger := snc.logger.New("syncnode", name, "endpoint", ctrl.String())
 
+	logger.Info("Attaching node", "chain", chainID, "passive", noSubscribe)
+
+	// create the managed node, register and return
+	node := NewManagedNode(logger, chainID, ctrl, snc.backend, noSubscribe)
+	snc.eventSys.Register(name, node, event.DefaultRegisterOpts())
 	controllersForChain.Set(node, struct{}{})
-	anchor, err := ctrl.AnchorPoint(context.Background())
-	if err != nil {
-		return nil, fmt.Errorf("failed to get anchor point: %w", err)
-	}
-	snc.emitter.Emit(superevents.AnchorEvent{
-		ChainID: chainID,
-		Anchor:  anchor,
-	})
 	node.Start()
 	return node, nil
 }

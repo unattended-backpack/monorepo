@@ -10,6 +10,7 @@ import (
 	"github.com/ethereum-optimism/optimism/op-program/chainconfig"
 	"github.com/ethereum-optimism/optimism/op-program/client/boot"
 	"github.com/ethereum-optimism/optimism/op-program/host/types"
+	"github.com/ethereum-optimism/optimism/op-service/eth"
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/ethereum/go-ethereum/params"
@@ -42,13 +43,13 @@ func TestValidInteropConfigIsValid(t *testing.T) {
 func TestL2BlockNum(t *testing.T) {
 	t.Run("RequiredForPreInterop", func(t *testing.T) {
 		cfg := validConfig()
-		cfg.L2ChainID = 0
+		cfg.L2ChainID = eth.ChainID{}
 		require.ErrorIs(t, cfg.Check(), ErrMissingL2ChainID)
 	})
 
 	t.Run("NotRequiredForInterop", func(t *testing.T) {
 		cfg := validInteropConfig()
-		cfg.L2ChainID = 0
+		cfg.L2ChainID = eth.ChainID{}
 		require.NoError(t, cfg.Check())
 	})
 }
@@ -82,11 +83,20 @@ func TestL1HeadRequired(t *testing.T) {
 	require.ErrorIs(t, err, ErrInvalidL1Head)
 }
 
-func TestL2HeadRequired(t *testing.T) {
-	config := validConfig()
-	config.L2Head = common.Hash{}
-	err := config.Check()
-	require.ErrorIs(t, err, ErrInvalidL2Head)
+func TestL2Head(t *testing.T) {
+	t.Run("RequiredPreInterop", func(t *testing.T) {
+		config := validConfig()
+		config.L2Head = common.Hash{}
+		err := config.Check()
+		require.ErrorIs(t, err, ErrInvalidL2Head)
+	})
+
+	t.Run("NotRequiredForInterop", func(t *testing.T) {
+		config := validInteropConfig()
+		config.L2Head = common.Hash{}
+		err := config.Check()
+		require.NoError(t, err)
+	})
 }
 
 func TestL2OutputRootRequired(t *testing.T) {
@@ -221,7 +231,7 @@ func TestRejectExecAndServerMode(t *testing.T) {
 func TestCustomL2ChainID(t *testing.T) {
 	t.Run("nonCustom", func(t *testing.T) {
 		cfg := validConfig()
-		require.Equal(t, cfg.L2ChainID, validL2Genesis.ChainID.Uint64())
+		require.Equal(t, cfg.L2ChainID, eth.ChainIDFromBig(validL2Genesis.ChainID))
 	})
 	t.Run("custom", func(t *testing.T) {
 		customChainConfig := &params.ChainConfig{ChainID: big.NewInt(0x1212121212)}

@@ -1,18 +1,22 @@
 // SPDX-License-Identifier: MIT
 pragma solidity 0.8.15;
 
+// Testing
 import { Test, stdStorage, StdStorage } from "forge-std/Test.sol";
-import { DeployUtils } from "scripts/libraries/DeployUtils.sol";
 
+// Libraries
+import { DeployUtils } from "scripts/libraries/DeployUtils.sol";
+import { Chains } from "scripts/libraries/Chains.sol";
+
+// Interfaces
 import { IDelayedWETH } from "interfaces/dispute/IDelayedWETH.sol";
 import { IPreimageOracle } from "interfaces/cannon/IPreimageOracle.sol";
 import { IMIPS } from "interfaces/cannon/IMIPS.sol";
 import { IDisputeGameFactory } from "interfaces/dispute/IDisputeGameFactory.sol";
 import { IAnchorStateRegistry } from "interfaces/dispute/IAnchorStateRegistry.sol";
-
 import { ISuperchainConfig } from "interfaces/L1/ISuperchainConfig.sol";
 import { IProtocolVersions } from "interfaces/L1/IProtocolVersions.sol";
-import { OPContractsManager } from "src/L1/OPContractsManager.sol";
+import { IOPContractsManager } from "interfaces/L1/IOPContractsManager.sol";
 import { IOptimismPortal2 } from "interfaces/L1/IOptimismPortal2.sol";
 import { ISystemConfig } from "interfaces/L1/ISystemConfig.sol";
 import { IL1CrossDomainMessenger } from "interfaces/L1/IL1CrossDomainMessenger.sol";
@@ -69,6 +73,9 @@ contract DeployImplementationsInput_Test is Test {
 
         vm.expectRevert("DeployImplementationsInput: not set");
         dii.protocolVersionsProxy();
+
+        vm.expectRevert("DeployImplementationsInput: not set");
+        dii.upgradeController();
     }
 }
 
@@ -80,7 +87,7 @@ contract DeployImplementationsOutput_Test is Test {
     }
 
     function test_set_succeeds() public {
-        OPContractsManager opcm = OPContractsManager(address(makeAddr("opcm")));
+        IOPContractsManager opcm = IOPContractsManager(address(makeAddr("opcm")));
         IOptimismPortal2 optimismPortalImpl = IOptimismPortal2(payable(makeAddr("optimismPortalImpl")));
         IDelayedWETH delayedWETHImpl = IDelayedWETH(payable(makeAddr("delayedWETHImpl")));
         IPreimageOracle preimageOracleSingleton = IPreimageOracle(makeAddr("preimageOracleSingleton"));
@@ -228,6 +235,8 @@ contract DeployImplementations_Test is Test {
     uint256 disputeGameFinalityDelaySeconds = 500;
     ISuperchainConfig superchainConfigProxy = ISuperchainConfig(makeAddr("superchainConfigProxy"));
     IProtocolVersions protocolVersionsProxy = IProtocolVersions(makeAddr("protocolVersionsProxy"));
+    IProxyAdmin superchainProxyAdmin = IProxyAdmin(makeAddr("superchainProxyAdmin"));
+    address upgradeController = makeAddr("upgradeController");
 
     function setUp() public virtual {
         vm.etch(address(superchainConfigProxy), hex"01");
@@ -263,8 +272,12 @@ contract DeployImplementations_Test is Test {
         dii.set(dii.mipsVersion.selector, 1);
         dii.set(dii.superchainConfigProxy.selector, address(superchainConfigProxy));
         dii.set(dii.protocolVersionsProxy.selector, address(protocolVersionsProxy));
+        dii.set(dii.superchainProxyAdmin.selector, address(superchainProxyAdmin));
+        dii.set(dii.upgradeController.selector, upgradeController);
 
         // Perform the initial deployment.
+        deployImplementations.deploySuperchainConfigImpl(dio);
+        deployImplementations.deployProtocolVersionsImpl(dio);
         deployImplementations.deploySystemConfigImpl(dio);
         deployImplementations.deployL1CrossDomainMessengerImpl(dio);
         deployImplementations.deployL1ERC721BridgeImpl(dio);
@@ -331,7 +344,7 @@ contract DeployImplementations_Test is Test {
         protocolVersionsProxy = IProtocolVersions(address(uint160(uint256(hash(_seed, 7)))));
 
         // Must configure the ProxyAdmin contract.
-        IProxyAdmin superchainProxyAdmin = IProxyAdmin(
+        superchainProxyAdmin = IProxyAdmin(
             DeployUtils.create1({
                 _name: "ProxyAdmin",
                 _args: DeployUtils.encodeConstructor(abi.encodeCall(IProxyAdmin.__constructor__, (msg.sender)))
@@ -363,6 +376,8 @@ contract DeployImplementations_Test is Test {
         dii.set(dii.l1ContractsRelease.selector, release);
         dii.set(dii.superchainConfigProxy.selector, address(superchainConfigProxy));
         dii.set(dii.protocolVersionsProxy.selector, address(protocolVersionsProxy));
+        dii.set(dii.superchainProxyAdmin.selector, address(superchainProxyAdmin));
+        dii.set(dii.upgradeController.selector, upgradeController);
 
         deployImplementations.run(dii, dio);
 
@@ -376,6 +391,8 @@ contract DeployImplementations_Test is Test {
         assertEq(release, dii.l1ContractsRelease(), "525");
         assertEq(address(superchainConfigProxy), address(dii.superchainConfigProxy()), "550");
         assertEq(address(protocolVersionsProxy), address(dii.protocolVersionsProxy()), "575");
+        assertEq(address(superchainProxyAdmin), address(dii.superchainProxyAdmin()), "600");
+        assertEq(upgradeController, dii.upgradeController(), "625");
 
         // Architecture assertions.
         assertEq(address(dio.mipsSingleton().oracle()), address(dio.preimageOracleSingleton()), "600");
@@ -385,7 +402,7 @@ contract DeployImplementations_Test is Test {
         dio.checkOutput(dii);
     }
 
-    function testFuzz_run_largeChallengePeriodSeconds_reverts(uint256 _challengePeriodSeconds) public {
+    function setDefaults() internal {
         // Set the defaults.
         dii.set(dii.withdrawalDelaySeconds.selector, withdrawalDelaySeconds);
         dii.set(dii.minProposalSizeBytes.selector, minProposalSizeBytes);
@@ -397,7 +414,11 @@ contract DeployImplementations_Test is Test {
         dii.set(dii.l1ContractsRelease.selector, release);
         dii.set(dii.superchainConfigProxy.selector, address(superchainConfigProxy));
         dii.set(dii.protocolVersionsProxy.selector, address(protocolVersionsProxy));
+        dii.set(dii.superchainProxyAdmin.selector, address(superchainProxyAdmin));
+    }
 
+    function testFuzz_run_largeChallengePeriodSeconds_reverts(uint256 _challengePeriodSeconds) public {
+        setDefaults();
         // Set the challenge period to a value that is too large, using vm.store because the setter
         // method won't allow it.
         challengePeriodSeconds = bound(_challengePeriodSeconds, uint256(type(uint64).max) + 1, type(uint256).max);
@@ -406,6 +427,19 @@ contract DeployImplementations_Test is Test {
         vm.store(address(dii), bytes32(slot), bytes32(challengePeriodSeconds));
 
         vm.expectRevert("DeployImplementationsInput: challengePeriodSeconds too large");
+        deployImplementations.run(dii, dio);
+    }
+
+    function test_run_deployMipsV1OnMainnetOrSepolia_reverts() public {
+        setDefaults();
+        dii.set(dii.mipsVersion.selector, 2);
+
+        vm.chainId(Chains.Mainnet);
+        vm.expectRevert("DeployImplementations: Only Mips32 should be deployed on Mainnet or Sepolia");
+        deployImplementations.run(dii, dio);
+
+        vm.chainId(Chains.Sepolia);
+        vm.expectRevert("DeployImplementations: Only Mips32 should be deployed on Mainnet or Sepolia");
         deployImplementations.run(dii, dio);
     }
 }
