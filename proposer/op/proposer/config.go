@@ -74,9 +74,6 @@ type CLIConfig struct {
 	// UseCachedDb is a flag to use a cached database instead of creating a new one.
 	UseCachedDb bool
 
-	// SlackToken is the token for the Slack API.
-	SlackToken string
-
 	// L1 Beacon RPC URL used to determine span batch boundaries.
 	BeaconRpc string
 	// The max size (in blocks) of a proof we will attempt to generate. If span batches are larger, we break them up.
@@ -139,7 +136,6 @@ func NewConfig(ctx *cli.Context) *CLIConfig {
 		L1EthRpc:     ctx.String(flags.L1EthRpcFlag.Name),
 		RollupRpc:    ctx.String(flags.RollupRpcFlag.Name),
 		L2OOAddress:  ctx.String(flags.L2OOAddressFlag.Name),
-		DGFAddress:   ctx.String(flags.DGFAddressFlag.Name),
 		PollInterval: ctx.Duration(flags.PollIntervalFlag.Name),
 		TxMgrConfig:  txmgr.ReadCLIConfig(ctx),
 		BeaconRpc:    ctx.String(flags.BeaconRpcFlag.Name),
@@ -155,7 +151,6 @@ func NewConfig(ctx *cli.Context) *CLIConfig {
 		WaitNodeSync:                 ctx.Bool(flags.WaitNodeSyncFlag.Name),
 		DbPath:                       dbPath,
 		UseCachedDb:                  ctx.Bool(flags.UseCachedDbFlag.Name),
-		SlackToken:                   ctx.String(flags.SlackTokenFlag.Name),
 		MaxBlockRangePerSpanProof:    ctx.Uint64(flags.MaxBlockRangePerSpanProofFlag.Name),
 		MaxConcurrentWitnessGen:      ctx.Uint64(flags.MaxConcurrentWitnessGenFlag.Name),
 		WitnessGenTimeout:            ctx.Uint64(flags.WitnessGenTimeoutFlag.Name),
@@ -163,5 +158,11 @@ func NewConfig(ctx *cli.Context) *CLIConfig {
 		OPSuccinctServerUrl:          ctx.String(flags.OPSuccinctServerUrlFlag.Name),
 		MaxConcurrentProofRequests:   ctx.Uint64(flags.MaxConcurrentProofRequestsFlag.Name),
 		Mock:                         ctx.Bool(flags.MockFlag.Name),
+		DGFAddress:                   ctx.String(flags.DGFAddressFlag.Name),
+
+		// NOTE(fakedev9999): GameType 6 is the game type for the op-succinct proof system.
+		// See https://github.com/ethereum-optimism/optimism/blob/develop/op-challenger/game/fault/types/types.go#L33
+		// Will be updated to OPSuccinctGameType once we upgrade to a new version of the op-challenger.
+		DisputeGameType: uint32(6),
 	}
 }
