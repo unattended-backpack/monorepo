@@ -1,5 +1,5 @@
 [workspace]
-members = ["utils/*", "programs/*", "scripts/*", "proposer/succinct"]
+members = ["utils/*", "programs/*", "scripts/*", "proposer/local"]
 resolver = "2"
 
 [workspace.package]
@@ -47,7 +47,7 @@ tracing-subscriber = { version = "0.3.18", features = ["fmt"] }
 kona-common = { git = "https://github.com/succinctlabs/kona", rev = "8ec836eae1cfe2ebad4624ae4f29839011382425" }
 kona-common-proc = { git = "https://github.com/succinctlabs/kona", rev = "8ec836eae1cfe2ebad4624ae4f29839011382425" }
 kona-preimage = { git = "https://github.com/succinctlabs/kona", rev = "8ec836eae1cfe2ebad4624ae4f29839011382425", features = [
-    "rkyv",
+	"rkyv",
 ] }
 kona-mpt = { git = "https://github.com/succinctlabs/kona", rev = "8ec836eae1cfe2ebad4624ae4f29839011382425" }
 kona-driver = { git = "https://github.com/succinctlabs/kona", rev = "8ec836eae1cfe2ebad4624ae4f29839011382425" }
@@ -69,7 +69,7 @@ op-succinct-proposer = { path = "proposer/succinct" }
 alloy = { version = "0.6.4", default-features = false, features = ["full"] }
 # Uses sha3 instead of tiny-keccak. Reduces cycle count for Keccak by 50%.
 alloy-primitives = { version = "0.8.12", default-features = false, features = [
-    "sha3-keccak",
+	"sha3-keccak",
 ] }
 alloy-rlp = { version = "0.3.8", default-features = false }
 alloy-eips = { version = "0.6.4", default-features = false }
@@ -80,7 +80,7 @@ alloy-sol-types = { version = "0.8" }
 # OP Alloy
 op-alloy-consensus = { version = "0.6.8", default-features = false }
 op-alloy-genesis = { version = "0.6.8", default-features = false, features = [
-    "serde",
+	"serde",
 ] }
 op-alloy-protocol = { version = "0.6.8", default-features = false }
 op-alloy-rpc-types = { version = "0.6.8", default-features = false }
