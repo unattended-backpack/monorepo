@@ -9,7 +9,7 @@ more about the OP stack architecture here: <https://docs.optimism.io/builders/ch
 # /op-succinct
 
 original repo: <https://github.com/succinctlabs/op-succinct/>
-forked version tag: `op-succinct-v1.0.1`
+forked version tag: `op-succinct-v1.2.3`
 
 Contains `op-succinct-proposer` and `op-succinct-server` ("proof server"").
 `op-succinct-proposer` monitors the L2 chain and periodically sends a request for
@@ -27,7 +27,7 @@ debugging isolated proof requests and isn't used in prod.
 # /op-geth
 
 original repo: <https://github.com/ethereum-optimism/op-geth>
-forked version tag: `v1.101411.5`
+forked version tag: `v1.101500.1`
 
 Contains the execution node for the op-stack chain.
 
@@ -51,7 +51,7 @@ at `op-geth/genesis.json`.
 # /optimism
 
 original repo: <https://github.com/ethereum-optimism/optimism/>
-forked version tag: `op-node/v1.10.3`
+forked version tag: `op-node/v1.11.2`
 
 Contains the op-stack chain `op-batcher` and `op-node` ("rollup node").
 See `optimism/example.env` for required env vars.

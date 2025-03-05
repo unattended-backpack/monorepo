@@ -2,9 +2,10 @@ use alloy_primitives::B256;
 use base64::{engine::general_purpose, Engine as _};
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_repr::{Deserialize_repr, Serialize_repr};
-use sp1_sdk::{CudaProver, SP1ProvingKey, SP1VerifyingKey};
-use std::{collections::HashMap, sync::Arc};
-use tokio::sync::RwLock;
+use sp1_sdk::{
+    network::FulfillmentStrategy, NetworkProver, SP1ProofMode, SP1ProvingKey, SP1VerifyingKey,
+};
+use std::sync::Arc;
 
 #[derive(Serialize, Deserialize, Debug)]
 pub struct ValidateConfigRequest {
@@ -65,11 +66,6 @@ impl From<String> for UnclaimDescription {
     }
 }
 
-pub enum ProofType {
-    Span,
-    Agg,
-}
-
 #[derive(Serialize, Deserialize)]
 /// The status of a proof request.
 pub struct ProofStatus {
@@ -79,21 +75,21 @@ pub struct ProofStatus {
     pub proof: Vec<u8>,
 }
 
-pub type ProofStore = Arc<RwLock<HashMap<Vec<u8>, ProofStatus>>>;
-
 /// Configuration of the L2 Output Oracle contract. Created once at server start-up, monitors if there are any changes
 /// to the contract's configuration.
 #[derive(Clone)]
 pub struct SuccinctProposerConfig {
-    pub range_vk: SP1VerifyingKey,
-    pub range_pk: SP1ProvingKey,
-    pub agg_pk: SP1ProvingKey,
-    pub agg_vk: SP1VerifyingKey,
+    pub range_vk: Arc<SP1VerifyingKey>,
+    pub range_pk: Arc<SP1ProvingKey>,
+    pub agg_pk: Arc<SP1ProvingKey>,
+    pub agg_vk: Arc<SP1VerifyingKey>,
     pub agg_vkey_hash: B256,
     pub range_vkey_commitment: B256,
     pub rollup_config_hash: B256,
-    pub proof_store: ProofStore,
-    pub prover_client: Arc<CudaProver>,
+    pub range_proof_strategy: FulfillmentStrategy,
+    pub agg_proof_strategy: FulfillmentStrategy,
+    pub agg_proof_mode: SP1ProofMode,
+    pub network_prover: Arc<NetworkProver>,
 }
 
 /// Deserialize a vector of base64 strings into a vector of vectors of bytes. Go serializes

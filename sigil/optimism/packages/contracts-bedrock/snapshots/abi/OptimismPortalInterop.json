@@ -787,11 +787,6 @@
   },
   {
     "inputs": [],
-    "name": "CustomGasTokenNotSupported",
-    "type": "error"
-  },
-  {
-    "inputs": [],
     "name": "EmptyItem",
     "type": "error"
   },
@@ -833,6 +828,11 @@
   {
     "inputs": [],
     "name": "LargeCalldata",
+    "type": "error"
+  },
+  {
+    "inputs": [],
+    "name": "LegacyGame",
     "type": "error"
   },
   {

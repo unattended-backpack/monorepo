@@ -8,6 +8,8 @@ import (
 
 	"github.com/ethereum-optimism/optimism/op-node/rollup"
 	"github.com/ethereum-optimism/optimism/op-program/chainconfig"
+	"github.com/ethereum-optimism/optimism/op-service/eth"
+	"github.com/ethereum-optimism/optimism/op-supervisor/supervisor/backend/depset"
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/params"
 )
@@ -22,23 +24,25 @@ type BootInfoInterop struct {
 	L1Head         common.Hash
 	AgreedPrestate common.Hash
 	Claim          common.Hash
-	ClaimTimestamp uint64
+	GameTimestamp  uint64
 }
 
 type ConfigSource interface {
-	RollupConfig(chainID uint64) (*rollup.Config, error)
-	ChainConfig(chainID uint64) (*params.ChainConfig, error)
+	RollupConfig(chainID eth.ChainID) (*rollup.Config, error)
+	ChainConfig(chainID eth.ChainID) (*params.ChainConfig, error)
+	DependencySet(chainID eth.ChainID) (depset.DependencySet, error)
 }
 type OracleConfigSource struct {
 	oracle oracleClient
 
 	customConfigsLoaded bool
 
-	l2ChainConfigs map[uint64]*params.ChainConfig
-	rollupConfigs  map[uint64]*rollup.Config
+	l2ChainConfigs map[eth.ChainID]*params.ChainConfig
+	rollupConfigs  map[eth.ChainID]*rollup.Config
+	depset         depset.DependencySet
 }
 
-func (c *OracleConfigSource) RollupConfig(chainID uint64) (*rollup.Config, error) {
+func (c *OracleConfigSource) RollupConfig(chainID eth.ChainID) (*rollup.Config, error) {
 	if cfg, ok := c.rollupConfigs[chainID]; ok {
 		return cfg, nil
 	}
@@ -57,7 +61,7 @@ func (c *OracleConfigSource) RollupConfig(chainID uint64) (*rollup.Config, error
 	return cfg, nil
 }
 
-func (c *OracleConfigSource) ChainConfig(chainID uint64) (*params.ChainConfig, error) {
+func (c *OracleConfigSource) ChainConfig(chainID eth.ChainID) (*params.ChainConfig, error) {
 	if cfg, ok := c.l2ChainConfigs[chainID]; ok {
 		return cfg, nil
 	}
@@ -76,6 +80,24 @@ func (c *OracleConfigSource) ChainConfig(chainID uint64) (*params.ChainConfig, e
 	return cfg, nil
 }
 
+func (c *OracleConfigSource) DependencySet(chainID eth.ChainID) (depset.DependencySet, error) {
+	if c.depset != nil {
+		return c.depset, nil
+	}
+	depSet, err := chainconfig.DependencySetByChainID(chainID)
+	if !c.customConfigsLoaded && err != nil {
+		c.loadCustomConfigs()
+		if c.depset == nil {
+			return nil, fmt.Errorf("%w: %v", ErrUnknownChainID, chainID)
+		}
+		return c.depset, nil
+	} else if err != nil {
+		return nil, err
+	}
+	c.depset = depSet
+	return c.depset, nil
+}
+
 func (c *OracleConfigSource) loadCustomConfigs() {
 	var rollupConfigs []*rollup.Config
 	err := json.Unmarshal(c.oracle.Get(RollupConfigLocalIndex), &rollupConfigs)
@@ -83,7 +105,7 @@ func (c *OracleConfigSource) loadCustomConfigs() {
 		panic("failed to bootstrap rollup configs")
 	}
 	for _, config := range rollupConfigs {
-		c.rollupConfigs[config.L2ChainID.Uint64()] = config
+		c.rollupConfigs[eth.ChainIDFromBig(config.L2ChainID)] = config
 	}
 
 	var chainConfigs []*params.ChainConfig
@@ -92,8 +114,15 @@ func (c *OracleConfigSource) loadCustomConfigs() {
 		panic("failed to bootstrap chain configs")
 	}
 	for _, config := range chainConfigs {
-		c.l2ChainConfigs[config.ChainID.Uint64()] = config
+		c.l2ChainConfigs[eth.ChainIDFromBig(config.ChainID)] = config
 	}
+
+	var depset depset.StaticConfigDependencySet
+	err = json.Unmarshal(c.oracle.Get(DependencySetLocalIndex), &depset)
+	if err != nil {
+		panic("failed to bootstrap dependency set")
+	}
+	c.depset = &depset
 	c.customConfigsLoaded = true
 }
 
@@ -106,12 +135,12 @@ func BootstrapInterop(r oracleClient) *BootInfoInterop {
 	return &BootInfoInterop{
 		Configs: &OracleConfigSource{
 			oracle:         r,
-			l2ChainConfigs: make(map[uint64]*params.ChainConfig),
-			rollupConfigs:  make(map[uint64]*rollup.Config),
+			l2ChainConfigs: make(map[eth.ChainID]*params.ChainConfig),
+			rollupConfigs:  make(map[eth.ChainID]*rollup.Config),
 		},
 		L1Head:         l1Head,
 		AgreedPrestate: agreedPrestate,
 		Claim:          claim,
-		ClaimTimestamp: claimTimestamp,
+		GameTimestamp:  claimTimestamp,
 	}
 }

@@ -7,13 +7,14 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/ethereum-optimism/optimism/kurtosis-devnet/pkg/descriptors"
+	"github.com/ethereum-optimism/optimism/devnet-sdk/descriptors"
 	"github.com/ethereum-optimism/optimism/kurtosis-devnet/pkg/kurtosis/api/fake"
 	"github.com/ethereum-optimism/optimism/kurtosis-devnet/pkg/kurtosis/api/interfaces"
 	"github.com/ethereum-optimism/optimism/kurtosis-devnet/pkg/kurtosis/sources/deployer"
 	"github.com/ethereum-optimism/optimism/kurtosis-devnet/pkg/kurtosis/sources/inspect"
 	"github.com/ethereum-optimism/optimism/kurtosis-devnet/pkg/kurtosis/sources/jwt"
 	"github.com/ethereum-optimism/optimism/kurtosis-devnet/pkg/kurtosis/sources/spec"
+	"github.com/ethereum/go-ethereum/common"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -134,7 +135,7 @@ func TestDeploy(t *testing.T) {
 	testWallets := deployer.WalletList{
 		{
 			Name:       "test-wallet",
-			Address:    "0x123",
+			Address:    common.HexToAddress("0x123"),
 			PrivateKey: "0xabc",
 		},
 	}
@@ -238,7 +239,7 @@ func TestGetEnvironmentInfo(t *testing.T) {
 	testWallets := deployer.WalletList{
 		{
 			Name:       "test-wallet",
-			Address:    "0x123",
+			Address:    common.HexToAddress("0x123"),
 			PrivateKey: "0xabc",
 		},
 	}
