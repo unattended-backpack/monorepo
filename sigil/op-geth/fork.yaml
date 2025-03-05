@@ -5,7 +5,7 @@ footer: |
 base:
   name: go-ethereum
   url: https://github.com/ethereum/go-ethereum
-  hash: f3c696fa1db75d0f78ea47dd0975f6f0de6fdd84 # v1.14.11
+  hash: f0e8a3e9c8a59ce3c97c2f474eee7a1e86544e8d # between v1.14.12 <> v1.14.13/v1.15
 fork:
   name: op-geth
   url: https://github.com/ethereum-optimism/op-geth
@@ -205,6 +205,12 @@ def:
           globs:
             - "eth/downloader/downloader.go"
             - "eth/downloader/receiptreference.go"
+        - title: PathDB diff-layers limit
+          description: |
+            Prevent the write-buffer to grow too large, to keep the journal optional,
+            and not restart on top of unavailable state.
+          globs:
+            - "triedb/pathdb/buffer.go"
         - title: Discv5 node discovery
           description: Fix discv5 option to allow discv5 to be an active source for node-discovery.
           globs:
@@ -216,14 +222,6 @@ def:
         - title: Generated TOML config update
           globs:
             - "eth/ethconfig/gen_config.go"
-    - title: "TrieDB PathDB-journal migration"
-      description: |
-        From version 1.13.15 to 1.14.0 upstream go-ethereum changed the PathDB journal version, without migration path.
-        For a better experience when updating op-geth, to not roll back any journaled stage changes,
-        op-geth implements backward-compatibility with the old journal version.
-        See upstream Geth PR 28940, and op-geth PR 368 for details.
-      globs:
-        - "triedb/pathdb/journal.go"
     - title: "Single threaded execution"
       description: |
         The cannon fault proofs virtual machine does not support the creation of threads. To ensure compatibility, 
@@ -337,13 +335,6 @@ def:
             not updated to handle the newly added `withdrawalsRoot` field in the block header.
           globs:
             - "cmd/evm/internal/t8ntool/block.go"
-    - title: "Hardware wallet support"
-      description: Extend Ledger wallet support for newer devices on Macos
-      sub:
-        - title: Fix Ledger discoverability
-          # upstream PR: https://github.com/ethereum/go-ethereum/pull/28863/
-          globs:
-            - "accounts/usbwallet/hub.go"
     - title: "Testing"
       description: Additional or modified tests, not already captured by the above diff
       ignore:
