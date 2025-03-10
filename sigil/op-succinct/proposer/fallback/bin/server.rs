@@ -595,6 +595,45 @@ async fn get_proof_status(
     let proof_id_bytes = hex::decode(&proof_id)?;
     let proof_id = B256::from_slice(&proof_id_bytes);
 
+    // request read-only copy of proof_store
+    let proof_store = state.proof_store.read().await;
+
+    // first check if this is a proof we're generating locally.  Otherwise check the network for it
+    if let Some(status) = proof_store.get(&proof_id) {
+        return Ok((
+            StatusCode::OK,
+            Json(ProofStatus {
+                fulfillment_status: status.fulfillment_status,
+                execution_status: status.execution_status,
+                proof: status.proof.clone(),
+            }),
+        ));
+    }
+
+    if state.local_proving_only == true {
+        // we should never get here.  If we're local proving only and a proof that was requested
+        // wasn't found locally we should send a response that prompts the proposer to retry that
+        // proof request.
+        error!(
+            "Status of proof {} not found locally.  Returning response to proposer to prompt retry",
+            proof_id
+        );
+
+        // When the proposer sees a FulfillmentStatus of Unfulfillable it will retry the proof
+        // request.  If the prover network is really down, the new request will fail inside
+        // `request_agg/span_proof()` and will be re-routed as a local proof
+        return Ok((
+            StatusCode::OK,
+            Json(ProofStatus {
+                fulfillment_status: FulfillmentStatus::Unfulfillable.into(),
+                // if execution status is also `Unexecutable`, then the retry proof request
+                // will be half the block size.  This keeps the request the same
+                execution_status: ExecutionStatus::UnspecifiedExecutionStatus.into(),
+                proof: vec![],
+            }),
+        ));
+    }
+
     let network_proof_status_request = || state.network_prover.get_proof_status(proof_id);
 
     // try to get the proof status, returning a failure to the proposer if it seems that the prover
