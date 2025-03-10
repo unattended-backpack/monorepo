@@ -3,9 +3,11 @@ use base64::{engine::general_purpose, Engine as _};
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_repr::{Deserialize_repr, Serialize_repr};
 use sp1_sdk::{
-    network::FulfillmentStrategy, NetworkProver, SP1ProofMode, SP1ProvingKey, SP1VerifyingKey,
+    network::FulfillmentStrategy, CudaProver, NetworkProver, SP1ProofMode, SP1ProvingKey,
+    SP1VerifyingKey,
 };
-use std::sync::Arc;
+use std::{collections::HashMap, sync::Arc};
+use tokio::{sync::RwLock, time::Duration};
 
 #[derive(Serialize, Deserialize, Debug)]
 pub struct ValidateConfigRequest {
@@ -66,6 +68,11 @@ impl From<String> for UnclaimDescription {
     }
 }
 
+pub enum ProofType {
+    Span,
+    Agg,
+}
+
 #[derive(Serialize, Deserialize)]
 /// The status of a proof request.
 pub struct ProofStatus {
@@ -74,6 +81,8 @@ pub struct ProofStatus {
     pub execution_status: i32,
     pub proof: Vec<u8>,
 }
+
+pub type ProofStore = Arc<RwLock<HashMap<Vec<u8>, ProofStatus>>>;
 
 /// Configuration of the L2 Output Oracle contract. Created once at server start-up, monitors if there are any changes
 /// to the contract's configuration.
@@ -90,6 +99,14 @@ pub struct SuccinctProposerConfig {
     pub agg_proof_strategy: FulfillmentStrategy,
     pub agg_proof_mode: SP1ProofMode,
     pub network_prover: Arc<NetworkProver>,
+    // liveness check on the prover network for each proof request.
+    // If no response is heard within this time the proof is made locally
+    // TODO: what about when the network goes down while it's proving??
+    pub network_timeout_duration_secs: Duration,
+    // for local proving mode
+    pub proof_store: ProofStore,
+    pub cuda_prover: Arc<CudaProver>,
+    pub local_proving_only: bool,
 }
 
 /// Deserialize a vector of base64 strings into a vector of vectors of bytes. Go serializes

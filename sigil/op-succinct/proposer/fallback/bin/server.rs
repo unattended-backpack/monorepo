@@ -1,5 +1,5 @@
 use alloy_primitives::{hex, Address, B256};
-use anyhow::Result;
+use anyhow::{Context, Result};
 use axum::{
     extract::{DefaultBodyLimit, Path, State},
     http::StatusCode,
@@ -7,10 +7,14 @@ use axum::{
     routing::{get, post},
     Json, Router,
 };
-use log::{error, info};
+use log::{error, info, warn};
 use op_succinct_client_utils::{
     boot::{hash_rollup_config, BootInfoStruct},
     types::u32_to_u8,
+};
+use op_succinct_fallback_proposer::{
+    AggProofRequest, ProofResponse, ProofStatus, ProofStore, ProofType, SpanProofRequest,
+    SuccinctProposerConfig, ValidateConfigRequest, ValidateConfigResponse,
 };
 use op_succinct_host_utils::{
     fetcher::{CacheMode, OPSuccinctDataFetcher, RunContext},
@@ -18,25 +22,27 @@ use op_succinct_host_utils::{
     stats::ExecutionStats,
     L2OutputOracle, ProgramType,
 };
-use op_succinct_proposer::{
-    AggProofRequest, ProofResponse, ProofStatus, SpanProofRequest, SuccinctProposerConfig,
-    ValidateConfigRequest, ValidateConfigResponse,
-};
 use sp1_sdk::{
     network::{
         proto::network::{ExecutionStatus, FulfillmentStatus},
         FulfillmentStrategy,
     },
-    utils, HashableKey, Prover, ProverClient, SP1Proof, SP1ProofMode, SP1ProofWithPublicValues,
-    SP1_CIRCUIT_VERSION,
+    utils, CudaProver, HashableKey, NetworkProver, Prover, ProverClient, SP1Proof, SP1ProofMode,
+    SP1ProofWithPublicValues, SP1ProvingKey, SP1Stdin, SP1_CIRCUIT_VERSION,
 };
 use std::{
+    collections::HashMap,
     env, fs,
     str::FromStr,
     sync::Arc,
     time::{Instant, SystemTime, UNIX_EPOCH},
 };
+use tokio::{
+    sync::RwLock,
+    time::{error::Elapsed, timeout, Duration},
+};
 use tower_http::limit::RequestBodyLimitLayer;
+use uuid::Uuid;
 
 pub const RANGE_ELF: &[u8] = include_bytes!("../../../elf/range-elf");
 pub const AGG_ELF: &[u8] = include_bytes!("../../../elf/aggregation-elf");
@@ -50,12 +56,17 @@ async fn main() -> Result<()> {
     utils::setup_logger();
     dotenv::dotenv().ok();
 
+    // network prover setup
     let network_prover = Arc::new(ProverClient::builder().network().build());
     let (range_pk, range_vk) = network_prover.setup(RANGE_ELF);
     let (agg_pk, agg_vk) = network_prover.setup(AGG_ELF);
     let multi_block_vkey_u8 = u32_to_u8(range_vk.vk.hash_u32());
     let range_vkey_commitment = B256::from(multi_block_vkey_u8);
     let agg_vkey_hash = B256::from_str(&agg_vk.bytes32()).unwrap();
+
+    // local cuda prover setup for fallback
+    let cuda_prover = Arc::new(ProverClient::builder().cuda().build());
+    let proof_store = Arc::new(RwLock::new(HashMap::new()));
 
     let fetcher = OPSuccinctDataFetcher::new_with_rollup_config(RunContext::Docker).await?;
     // Note: The rollup config hash never changes for a given chain, so we can just hash it once at
@@ -79,6 +90,23 @@ async fn main() -> Result<()> {
         _ => SP1ProofMode::Groth16,
     };
 
+    // defaults to false, but can be set to true to never make succinct prover network requests
+    let local_proving_only = match env::var("LOCAL_PROVING_ONLY") {
+        Ok(on) if on.to_lowercase() == "true" => true,
+        _ => false,
+    };
+
+    // defaults to 4 mins
+    let network_timeout_duration_secs = match env::var("NETWORK_TIMEOUT_DURATION_SECS") {
+        Ok(secs) => {
+            let secs: u64 = secs
+                .parse()
+                .context("parsing env var NETWORK_TIMEOUT_DURATION_SECS as u64")?;
+            Duration::from_secs(secs)
+        }
+        _ => Duration::from_secs(4 * 60),
+    };
+
     // Initialize global hashes.
     let global_hashes = SuccinctProposerConfig {
         agg_vkey_hash,
@@ -92,6 +120,10 @@ async fn main() -> Result<()> {
         agg_proof_strategy,
         agg_proof_mode,
         network_prover,
+        network_timeout_duration_secs,
+        proof_store,
+        cuda_prover,
+        local_proving_only,
     };
 
     let app = Router::new()
@@ -191,19 +223,38 @@ async fn request_span_proof(
         }
     };
 
-    let proof_id = state
-        .network_prover
-        .prove(&state.range_pk, &sp1_stdin)
-        .compressed()
-        .strategy(state.range_proof_strategy)
-        .skip_simulation(true)
-        .cycle_limit(1_000_000_000_000)
-        .request_async()
+    let proof_id = if state.local_proving_only {
+        todo!()
+        // send_proof(
+        //     ProofType::Span,
+        //     state.proof_store.clone(),
+        //     state.cuda_prover.clone(),
+        //     state.range_pk,
+        //     sp1_stdin,
+        // )
+        // .await?
+    } else {
+        match request_network_proof_with_timeout(
+            state.network_prover.clone(),
+            state.range_pk,
+            state.range_proof_strategy,
+            state.network_timeout_duration_secs,
+            &sp1_stdin,
+        )
         .await
-        .map_err(|e| {
-            error!("Failed to request proof: {}", e);
-            AppError(anyhow::anyhow!("Failed to request proof: {}", e))
-        })?;
+        {
+            Ok(network_response) => network_response.map_err(|e| {
+                error!("Failed to request proof: {}", e);
+                AppError(anyhow::anyhow!("Failed to request proof: {}", e))
+            })?,
+            // TODO: this can be errors other than timeout, fix it
+            Err(timeout) => {
+                // TODO: local proof req
+                warn!("Reached timeout before getting a response from prover network: {timeout}. Requesting proof locally.");
+                todo!()
+            }
+        }
+    };
 
     Ok((
         StatusCode::OK,
@@ -512,6 +563,7 @@ async fn request_mock_agg_proof(
 }
 
 /// Get the status of a proof.
+// TODO: request proof locally if we get 3 failures on hitting prover network
 async fn get_proof_status(
     State(state): State<SuccinctProposerConfig>,
     Path(proof_id): Path<String>,
@@ -617,6 +669,169 @@ async fn get_proof_status(
             proof: vec![],
         }),
     ))
+}
+
+// Sends a proof request to the prover network and times out if no response is
+// heard within the timeout period
+// TODO: make this work for agg proofs too
+async fn request_network_proof_with_timeout(
+    network_prover: Arc<NetworkProver>,
+    range_pk: Arc<SP1ProvingKey>,
+    range_proof_strategy: FulfillmentStrategy,
+    timeout_duration_secs: Duration,
+    sp1_stdin: &SP1Stdin,
+) -> Result<Result<B256>, Elapsed> {
+    timeout(
+        timeout_duration_secs,
+        network_prover
+            .prove(&range_pk, sp1_stdin)
+            .compressed()
+            .strategy(range_proof_strategy)
+            .skip_simulation(true)
+            .cycle_limit(1_000_000_000_000)
+            .request_async(), // .await
+                              // .map_err(|e| {
+                              //     error!("Failed to request proof: {}", e);
+                              //     AppError(anyhow::anyhow!("Failed to request proof: {}", e))
+                              // })?,
+    )
+    .await
+}
+
+// spawns a process that creates a proof locally
+// runs proof in a background thread.  Only needs to be async because of
+// proof_store.write().await.  It isn't blocked by anything else.
+async fn send_proof(
+    proof_type: ProofType,
+    proof_store: ProofStore,
+    cuda_prover: Arc<CudaProver>,
+    proving_key: SP1ProvingKey,
+    sp1_stdin: SP1Stdin,
+) -> Result<B256, AppError> {
+    let proof_id = uuid_to_hex_bytes(Uuid::new_v4());
+    let proof_id_clone = proof_id.clone();
+
+    let initial_status = ProofStatus {
+        fulfillment_status: 2,
+        execution_status: 1,
+        proof: Vec::new(),
+    };
+
+    proof_store
+        .write()
+        .await
+        .insert(proof_id.clone(), initial_status);
+
+    tokio::spawn(async move {
+        let start_time = tokio::time::Instant::now();
+        info!("computing {proof_type} proof with id {:?}", proof_id);
+
+        let proof_res = match proof_type {
+            ProofType::Span => {
+                // the cuda prover keeps state of the last `setup()` that was called on it.
+                // You must call `setup()` then `prove` *each* time you intend to
+                // prove a certain program
+                let _ = cuda_prover.setup(RANGE_ELF);
+                cuda_prover
+                    .prove(&proving_key, &sp1_stdin)
+                    .compressed()
+                    .run()
+            }
+            ProofType::Agg => {
+                // the cuda prover keeps state of the last `setup()` that was called on it.
+                // You must call `setup()` then `prove` *each* time you intend to
+                // prove a certain program
+                let _ = cuda_prover.setup(AGG_ELF);
+                cuda_prover.prove(&proving_key, &sp1_stdin).groth16().run()
+            }
+        };
+
+        /* FOR REFERENCE
+        #[repr(i32)]
+        pub enum ExecutionStatus {
+            UnspecifiedExecutionStatus = 0,
+            /// The request has not been executed.
+            Unexecuted = 1,
+            /// The request has been executed.
+            Executed = 2,
+            /// The request cannot be executed.
+            Unexecutable = 3,
+        }
+
+        #[repr(i32)]
+        pub enum FulfillmentStatus {
+            UnspecifiedFulfillmentStatus = 0,
+            /// The request has been requested.
+            Requested = 1,
+            /// The request has been assigned to a fulfiller.
+            Assigned = 2,
+            /// The request has been fulfilled.
+            Fulfilled = 3,
+            /// The request cannot be fulfilled.
+            Unfulfillable = 4,
+        }
+        * */
+
+        let proof_status = match proof_res {
+            // proof is done, can return it
+            Ok(proof) => {
+                match proof.proof {
+                    SP1Proof::Compressed(_) => {
+                        // If it's a compressed proof, we need to serialize the entire struct with bincode.
+                        // Note: We're re-serializing the entire struct with bincode here, but this is fine
+                        // because we're on localhost and the size of the struct is small.
+                        let proof_bytes = bincode::serialize(&proof).unwrap();
+                        ProofStatus {
+                            fulfillment_status: 3,
+                            execution_status: 2,
+                            proof: proof_bytes,
+                        }
+                    }
+                    SP1Proof::Groth16(_) => {
+                        // If it's a groth16 proof, we need to get the proof bytes that we put on-chain.
+                        let proof_bytes = proof.bytes();
+                        ProofStatus {
+                            fulfillment_status: 3,
+                            execution_status: 2,
+                            proof: proof_bytes,
+                        }
+                    }
+                    SP1Proof::Plonk(_) => {
+                        // If it's a plonk proof, we need to get the proof bytes that we put on-chain.
+                        let proof_bytes = proof.bytes();
+                        ProofStatus {
+                            fulfillment_status: 3,
+                            execution_status: 2,
+                            proof: proof_bytes,
+                        }
+                    }
+                    _ => {
+                        log::error!("unknown proof type: {proof:?}");
+                        return Err(AppError(anyhow::anyhow!("unknown proof type: {proof:?}")));
+                    }
+                }
+            }
+            Err(e) => {
+                log::error!("error proving {e}");
+                return Err(AppError(anyhow::anyhow!("error proving {e}")));
+            }
+        };
+
+        info!("proof completed. id {:?}", proof_id);
+        let minutes = start_time.elapsed().as_secs_f64() / 60.0;
+        info!("Time to compute {proof_type} proof: {} minutes", minutes);
+
+        // update proof store
+        proof_store.write().await.insert(proof_id, proof_status);
+
+        Ok(())
+    });
+
+    Ok(proof_id_clone)
+}
+
+fn uuid_to_hex_bytes(uuid: Uuid) -> Vec<u8> {
+    format!("0x{:016x}", uuid.as_u128() >> 64).into_bytes()
 }
 
 pub struct AppError(anyhow::Error);
