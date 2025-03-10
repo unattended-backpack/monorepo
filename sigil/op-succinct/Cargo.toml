@@ -5,7 +5,7 @@ members = [
 	"scripts/*",
 	"proposer/succinct",
 	"fault_proof",
-	"proposer/op-succinct-fallback-proposer",
+	"proposer/fallback",
 ]
 resolver = "2"
 
