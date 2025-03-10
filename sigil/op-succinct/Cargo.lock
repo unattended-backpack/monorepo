@@ -297,6 +297,7 @@ dependencies = [
  "const-hex",
  "derive_more 2.0.1",
  "foldhash",
+ "getrandom 0.2.15",
  "hashbrown 0.15.2",
  "indexmap 2.7.1",
  "itoa",
@@ -4162,7 +4163,6 @@ dependencies = [
  "sp1-sdk",
  "tokio",
  "tower-http",
- "uuid",
 ]
 
 [[package]]
@@ -7459,9 +7459,6 @@ name = "uuid"
 version = "1.15.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e0f540e3240398cce6128b64ba83fdbdd86129c16a3aa1a3a252efd66eb3d587"
-dependencies = [
- "getrandom 0.3.1",
-]
 
 [[package]]
 name = "valuable"

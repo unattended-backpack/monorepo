@@ -6,7 +6,7 @@ use sp1_sdk::{
     network::FulfillmentStrategy, CudaProver, NetworkProver, SP1ProofMode, SP1ProvingKey,
     SP1VerifyingKey,
 };
-use std::{collections::HashMap, sync::Arc};
+use std::{collections::HashMap, fmt::Display, sync::Arc};
 use tokio::{sync::RwLock, time::Duration};
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -73,6 +73,15 @@ pub enum ProofType {
     Agg,
 }
 
+impl Display for ProofType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ProofType::Span => write!(f, "span"),
+            ProofType::Agg => write!(f, "agg"),
+        }
+    }
+}
+
 #[derive(Serialize, Deserialize)]
 /// The status of a proof request.
 pub struct ProofStatus {
@@ -82,7 +91,7 @@ pub struct ProofStatus {
     pub proof: Vec<u8>,
 }
 
-pub type ProofStore = Arc<RwLock<HashMap<Vec<u8>, ProofStatus>>>;
+pub type ProofStore = Arc<RwLock<HashMap<B256, ProofStatus>>>;
 
 /// Configuration of the L2 Output Oracle contract. Created once at server start-up, monitors if there are any changes
 /// to the contract's configuration.

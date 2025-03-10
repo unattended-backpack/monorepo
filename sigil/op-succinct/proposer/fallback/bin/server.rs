@@ -42,7 +42,6 @@ use tokio::{
     time::{error::Elapsed, timeout, Duration},
 };
 use tower_http::limit::RequestBodyLimitLayer;
-use uuid::Uuid;
 
 pub const RANGE_ELF: &[u8] = include_bytes!("../../../elf/range-elf");
 pub const AGG_ELF: &[u8] = include_bytes!("../../../elf/aggregation-elf");
@@ -708,7 +707,7 @@ async fn send_proof(
     proving_key: SP1ProvingKey,
     sp1_stdin: SP1Stdin,
 ) -> Result<B256, AppError> {
-    let proof_id = uuid_to_hex_bytes(Uuid::new_v4());
+    let proof_id = B256::random();
     let proof_id_clone = proof_id.clone();
 
     let initial_status = ProofStatus {
@@ -828,10 +827,6 @@ async fn send_proof(
     });
 
     Ok(proof_id_clone)
-}
-
-fn uuid_to_hex_bytes(uuid: Uuid) -> Vec<u8> {
-    format!("0x{:016x}", uuid.as_u128() >> 64).into_bytes()
 }
 
 pub struct AppError(anyhow::Error);
