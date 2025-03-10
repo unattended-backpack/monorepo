@@ -216,46 +216,7 @@ async fn request_span_proof(
         }
     };
 
-    let proof_id = if state.local_proving_only {
-        send_proof(
-            ProofType::Span,
-            state.proof_store.clone(),
-            state.cuda_prover.clone(),
-            sp1_stdin,
-        )
-        .await?
-    } else {
-        // future producing closure
-        let network_proof_request = || {
-            state
-                .network_prover
-                .prove(&state.range_pk, &sp1_stdin)
-                .compressed()
-                .strategy(state.range_proof_strategy)
-                .skip_simulation(true)
-                .cycle_limit(1_000_000_000_000)
-                .request_async()
-        };
-
-        // request the future a number of times
-        match request_with_retries(state.prover_network_retries, network_proof_request).await {
-            Ok(proof_id) => proof_id,
-            Err(_) => {
-                error!(
-                    "Prover network request for span proof {} failed. Requesting proof locally.",
-                    payload
-                );
-
-                send_proof(
-                    ProofType::Span,
-                    state.proof_store.clone(),
-                    state.cuda_prover.clone(),
-                    sp1_stdin,
-                )
-                .await?
-            }
-        }
-    };
+    let proof_id = route_proof(ProofType::Span, &state, sp1_stdin).await?;
 
     Ok((
         StatusCode::OK,
@@ -354,41 +315,7 @@ async fn request_agg_proof(
             }
         };
 
-    let proof_id = if state.local_proving_only {
-        send_proof(
-            ProofType::Agg,
-            state.proof_store.clone(),
-            state.cuda_prover.clone(),
-            sp1_stdin,
-        )
-        .await?
-    } else {
-        // future producing closure
-        let network_proof_request = || {
-            state
-                .network_prover
-                .prove(&state.agg_pk, &sp1_stdin)
-                .mode(state.agg_proof_mode)
-                .strategy(state.agg_proof_strategy)
-                .request_async()
-        };
-
-        // request the future a number of times
-        match request_with_retries(state.prover_network_retries, network_proof_request).await {
-            Ok(proof_id) => proof_id,
-            Err(_) => {
-                error!("Prover network request to generate agg proof failed. Requesting proof locally.");
-
-                send_proof(
-                    ProofType::Agg,
-                    state.proof_store.clone(),
-                    state.cuda_prover.clone(),
-                    sp1_stdin,
-                )
-                .await?
-            }
-        }
-    };
+    let proof_id = route_proof(ProofType::Agg, &state, sp1_stdin).await?;
 
     Ok((
         StatusCode::OK,
@@ -779,10 +706,77 @@ async fn get_proof_status(
     ))
 }
 
+// if LOCAL_PROVING_ONLY is set to true, request a local proof
+// otherwise, make a request to the prover network.  If this request
+// fails PROVER_NETWORK_RETRIES times, then fall back to local proving
+async fn route_proof(
+    proof_type: ProofType,
+    state: &SuccinctProposerConfig,
+    sp1_stdin: SP1Stdin,
+) -> Result<B256, AppError> {
+    if state.local_proving_only {
+        locally_prove(
+            proof_type,
+            state.proof_store.clone(),
+            state.cuda_prover.clone(),
+            sp1_stdin,
+        )
+        .await
+    } else {
+        let prover_network_response = match proof_type {
+            ProofType::Span => {
+                let network_request = || {
+                    state
+                        .network_prover
+                        .prove(&state.range_pk, &sp1_stdin)
+                        .compressed()
+                        .strategy(state.range_proof_strategy)
+                        .skip_simulation(true)
+                        .cycle_limit(1_000_000_000_000)
+                        .request_async()
+                };
+                request_with_retries(state.prover_network_retries, network_request).await
+            }
+            ProofType::Agg => {
+                let network_request = || {
+                    state
+                        .network_prover
+                        .prove(&state.agg_pk, &sp1_stdin)
+                        .mode(state.agg_proof_mode)
+                        .strategy(state.agg_proof_strategy)
+                        .request_async()
+                };
+                request_with_retries(state.prover_network_retries, network_request).await
+            }
+        };
+
+        // request the future a number of times
+        match prover_network_response {
+            // success
+            Ok(proof_id) => Ok(proof_id),
+            // failed after PROVER_NETWORK_RETRIES retries, make the proof locally
+            Err(_) => {
+                error!(
+                    "Prover network request for {} proof failed. Requesting proof locally.",
+                    proof_type
+                );
+
+                locally_prove(
+                    proof_type,
+                    state.proof_store.clone(),
+                    state.cuda_prover.clone(),
+                    sp1_stdin,
+                )
+                .await
+            }
+        }
+    }
+}
+
 // spawns a process that creates a proof locally
 // runs proof in a background thread.  Only needs to be async because of
 // proof_store.write().await.  It isn't blocked by anything else.
-async fn send_proof(
+async fn locally_prove(
     proof_type: ProofType,
     proof_store: ProofStore,
     cuda_prover: Arc<CudaProver>,
