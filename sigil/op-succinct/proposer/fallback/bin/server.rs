@@ -14,7 +14,7 @@ use op_succinct_client_utils::{
 };
 use op_succinct_fallback_proposer::{
     AggProofRequest, ProofResponse, ProofStatus, ProofStore, ProofType, SpanProofRequest,
-    SuccinctProposerConfig, ValidateConfigRequest, ValidateConfigResponse,
+    SuccinctProposerConfig, ValidateConfigRequest, ValidateConfigResponse, request_with_retries
 };
 use op_succinct_host_utils::{
     fetcher::{CacheMode, OPSuccinctDataFetcher, RunContext},
@@ -95,15 +95,12 @@ async fn main() -> Result<()> {
         _ => false,
     };
 
-    // defaults to 4 mins
-    let network_timeout_duration_secs = match env::var("NETWORK_TIMEOUT_DURATION_SECS") {
-        Ok(secs) => {
-            let secs: u64 = secs
-                .parse()
-                .context("parsing env var NETWORK_TIMEOUT_DURATION_SECS as u64")?;
-            Duration::from_secs(secs)
-        }
-        _ => Duration::from_secs(4 * 60),
+    // defaults to 3 retries
+    let prover_network_retries: usize = match env::var("PROVER_NETWORK_RETRIES") {
+        Ok(retries) => retries
+            .parse()
+            .context("parse PROVER_NETWORK_RETRIES as usize")?,
+        _ => 3,
     };
 
     // Initialize global hashes.
@@ -119,7 +116,7 @@ async fn main() -> Result<()> {
         agg_proof_strategy,
         agg_proof_mode,
         network_prover,
-        network_timeout_duration_secs,
+        prover_network_retries,
         proof_store,
         cuda_prover,
         local_proving_only,
@@ -223,24 +220,38 @@ async fn request_span_proof(
     };
 
     let proof_id = if state.local_proving_only {
-        todo!()
-        // send_proof(
-        //     ProofType::Span,
-        //     state.proof_store.clone(),
-        //     state.cuda_prover.clone(),
-        //     state.range_pk,
-        //     sp1_stdin,
-        // )
-        // .await?
-    } else {
-        match request_network_proof_with_timeout(
-            state.network_prover.clone(),
-            state.range_pk,
-            state.range_proof_strategy,
-            state.network_timeout_duration_secs,
-            &sp1_stdin,
+        send_proof(
+            ProofType::Span,
+            state.proof_store.clone(),
+            state.cuda_prover.clone(),
+            sp1_stdin,
         )
-        .await
+        .await?
+    } else {
+
+
+        let network_proof_request = || {
+state.network_prover
+        .prove(&state.range_pk, &sp1_stdin)
+        .compressed()
+        .strategy(state.range_proof_strategy)
+        .skip_simulation(true)
+        .cycle_limit(1_000_000_000_000)
+        .request_async()
+    };
+
+        match request_with_retries(state.prover_network_retries, 
+            network_proof_request
+).await
+
+        // match request_network_proof_with_retry(
+        //     state.network_prover.clone(),
+        //     state.range_pk,
+        //     state.range_proof_strategy,
+        //     state.retries,
+        //     &sp1_stdin,
+        // )
+        // .await
         {
             Ok(network_response) => network_response.map_err(|e| {
                 error!("Failed to request proof: {}", e);
@@ -250,7 +261,14 @@ async fn request_span_proof(
             Err(timeout) => {
                 // TODO: local proof req
                 warn!("Reached timeout before getting a response from prover network: {timeout}. Requesting proof locally.");
-                todo!()
+
+                send_proof(
+                    ProofType::Span,
+                    state.proof_store.clone(),
+                    state.cuda_prover.clone(),
+                    sp1_stdin,
+                )
+                .await?
             }
         }
     };
@@ -670,33 +688,6 @@ async fn get_proof_status(
     ))
 }
 
-// Sends a proof request to the prover network and times out if no response is
-// heard within the timeout period
-// TODO: make this work for agg proofs too
-async fn request_network_proof_with_timeout(
-    network_prover: Arc<NetworkProver>,
-    range_pk: Arc<SP1ProvingKey>,
-    range_proof_strategy: FulfillmentStrategy,
-    timeout_duration_secs: Duration,
-    sp1_stdin: &SP1Stdin,
-) -> Result<Result<B256>, Elapsed> {
-    timeout(
-        timeout_duration_secs,
-        network_prover
-            .prove(&range_pk, sp1_stdin)
-            .compressed()
-            .strategy(range_proof_strategy)
-            .skip_simulation(true)
-            .cycle_limit(1_000_000_000_000)
-            .request_async(), // .await
-                              // .map_err(|e| {
-                              //     error!("Failed to request proof: {}", e);
-                              //     AppError(anyhow::anyhow!("Failed to request proof: {}", e))
-                              // })?,
-    )
-    .await
-}
-
 // spawns a process that creates a proof locally
 // runs proof in a background thread.  Only needs to be async because of
 // proof_store.write().await.  It isn't blocked by anything else.
@@ -704,7 +695,6 @@ async fn send_proof(
     proof_type: ProofType,
     proof_store: ProofStore,
     cuda_prover: Arc<CudaProver>,
-    proving_key: SP1ProvingKey,
     sp1_stdin: SP1Stdin,
 ) -> Result<B256, AppError> {
     let proof_id = B256::random();
@@ -730,7 +720,7 @@ async fn send_proof(
                 // the cuda prover keeps state of the last `setup()` that was called on it.
                 // You must call `setup()` then `prove` *each* time you intend to
                 // prove a certain program
-                let _ = cuda_prover.setup(RANGE_ELF);
+                let (proving_key, _) = cuda_prover.setup(RANGE_ELF);
                 cuda_prover
                     .prove(&proving_key, &sp1_stdin)
                     .compressed()
@@ -740,7 +730,7 @@ async fn send_proof(
                 // the cuda prover keeps state of the last `setup()` that was called on it.
                 // You must call `setup()` then `prove` *each* time you intend to
                 // prove a certain program
-                let _ = cuda_prover.setup(AGG_ELF);
+                let (proving_key, _) = cuda_prover.setup(AGG_ELF);
                 cuda_prover.prove(&proving_key, &sp1_stdin).groth16().run()
             }
         };
