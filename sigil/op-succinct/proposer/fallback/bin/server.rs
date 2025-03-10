@@ -241,7 +241,10 @@ async fn request_span_proof(
         match request_with_retries(state.prover_network_retries, network_proof_request).await {
             Ok(proof_id) => proof_id,
             Err(_) => {
-                error!("Prover network request failed. Requesting proof locally.");
+                error!(
+                    "Prover network request for span proof {} failed. Requesting proof locally.",
+                    payload
+                );
 
                 send_proof(
                     ProofType::Span,
@@ -374,7 +377,7 @@ async fn request_agg_proof(
         match request_with_retries(state.prover_network_retries, network_proof_request).await {
             Ok(proof_id) => proof_id,
             Err(_) => {
-                error!("Prover network request failed. Requesting proof locally.");
+                error!("Prover network request to generate agg proof failed. Requesting proof locally.");
 
                 send_proof(
                     ProofType::Agg,
@@ -589,20 +592,67 @@ async fn get_proof_status(
 ) -> Result<(StatusCode, Json<ProofStatus>), AppError> {
     info!("Received proof status request: {:?}", proof_id);
 
-    let proof_id_bytes = hex::decode(proof_id)?;
+    let proof_id_bytes = hex::decode(&proof_id)?;
+    let proof_id = B256::from_slice(&proof_id_bytes);
 
-    // This request will time out if the server is down.
-    let (status, maybe_proof) = match state
-        .network_prover
-        .get_proof_status(B256::from_slice(&proof_id_bytes))
-        .await
+    let network_proof_status_request = || state.network_prover.get_proof_status(proof_id);
+
+    // try to get the proof status, returning a failure to the proposer if it seems that the prover
+    // network is down
+    let (status, maybe_proof) = match request_with_retries(
+        state.prover_network_retries,
+        network_proof_status_request,
+    )
+    .await
     {
         Ok(res) => res,
-        Err(e) => {
-            error!("Failed to get proof status: {}", e);
-            return Err(AppError(e));
+        Err(_) => {
+            error!(
+                "Prover network request for status of proof {} failed",
+                proof_id
+            );
+
+            // When the proposer sees a FulfillmentStatus of Unfulfillable it will retry the proof
+            // request.  If the prover network is really down, the new request will fail inside
+            // `request_agg/span_proof()` and will be re-routed as a local proof
+            return Ok((
+                StatusCode::OK,
+                Json(ProofStatus {
+                    fulfillment_status: FulfillmentStatus::Unfulfillable.into(),
+                    // if execution status is also `Unexecutable`, then the retry proof request
+                    // will be half the block size.  This keeps the request the same
+                    execution_status: ExecutionStatus::UnspecifiedExecutionStatus.into(),
+                    proof: vec![],
+                }),
+            ));
         }
     };
+
+    /* FOR REFERENCE
+    #[repr(i32)]
+    pub enum ExecutionStatus {
+        UnspecifiedExecutionStatus = 0,
+        /// The request has not been executed.
+        Unexecuted = 1,
+        /// The request has been executed.
+        Executed = 2,
+        /// The request cannot be executed.
+        Unexecutable = 3,
+    }
+
+    #[repr(i32)]
+    pub enum FulfillmentStatus {
+        UnspecifiedFulfillmentStatus = 0,
+        /// The request has been requested.
+        Requested = 1,
+        /// The request has been assigned to a fulfiller.
+        Assigned = 2,
+        /// The request has been fulfilled.
+        Fulfilled = 3,
+        /// The request cannot be fulfilled.
+        Unfulfillable = 4,
+    }
+    * */
 
     // Check the deadline.
     if status.deadline
@@ -702,8 +752,8 @@ async fn send_proof(
     let proof_id = B256::random();
 
     let initial_status = ProofStatus {
-        fulfillment_status: 2,
-        execution_status: 1,
+        fulfillment_status: FulfillmentStatus::Assigned.into(),
+        execution_status: ExecutionStatus::Unexecuted.into(),
         proof: Vec::new(),
     };
 
@@ -733,32 +783,6 @@ async fn send_proof(
             }
         };
 
-        /* FOR REFERENCE
-        #[repr(i32)]
-        pub enum ExecutionStatus {
-            UnspecifiedExecutionStatus = 0,
-            /// The request has not been executed.
-            Unexecuted = 1,
-            /// The request has been executed.
-            Executed = 2,
-            /// The request cannot be executed.
-            Unexecutable = 3,
-        }
-
-        #[repr(i32)]
-        pub enum FulfillmentStatus {
-            UnspecifiedFulfillmentStatus = 0,
-            /// The request has been requested.
-            Requested = 1,
-            /// The request has been assigned to a fulfiller.
-            Assigned = 2,
-            /// The request has been fulfilled.
-            Fulfilled = 3,
-            /// The request cannot be fulfilled.
-            Unfulfillable = 4,
-        }
-        * */
-
         let proof_status = match proof_res {
             // proof is done, can return it
             Ok(proof) => {
@@ -769,8 +793,8 @@ async fn send_proof(
                         // because we're on localhost and the size of the struct is small.
                         let proof_bytes = bincode::serialize(&proof).unwrap();
                         ProofStatus {
-                            fulfillment_status: 3,
-                            execution_status: 2,
+                            fulfillment_status: FulfillmentStatus::Fulfilled.into(),
+                            execution_status: ExecutionStatus::Executed.into(),
                             proof: proof_bytes,
                         }
                     }
@@ -778,8 +802,8 @@ async fn send_proof(
                         // If it's a groth16 proof, we need to get the proof bytes that we put on-chain.
                         let proof_bytes = proof.bytes();
                         ProofStatus {
-                            fulfillment_status: 3,
-                            execution_status: 2,
+                            fulfillment_status: FulfillmentStatus::Fulfilled.into(),
+                            execution_status: ExecutionStatus::Executed.into(),
                             proof: proof_bytes,
                         }
                     }
@@ -787,8 +811,8 @@ async fn send_proof(
                         // If it's a plonk proof, we need to get the proof bytes that we put on-chain.
                         let proof_bytes = proof.bytes();
                         ProofStatus {
-                            fulfillment_status: 3,
-                            execution_status: 2,
+                            fulfillment_status: FulfillmentStatus::Fulfilled.into(),
+                            execution_status: ExecutionStatus::Executed.into(),
                             proof: proof_bytes,
                         }
                     }

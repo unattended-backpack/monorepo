@@ -29,11 +29,26 @@ pub struct SpanProofRequest {
     pub end: u64,
 }
 
+impl Display for SpanProofRequest {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "proof start block: {}, proof end block: {}",
+            self.start, self.end
+        )
+    }
+}
+
 #[derive(Deserialize, Serialize, Debug)]
 pub struct AggProofRequest {
     #[serde(deserialize_with = "deserialize_base64_vec")]
     pub subproofs: Vec<Vec<u8>>,
     pub head: String,
+}
+
+pub enum GenericProofRequest {
+    Span(SpanProofRequest),
+    Agg(AggProofRequest),
 }
 
 #[derive(Deserialize, Serialize, Debug)]
