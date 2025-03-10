@@ -9,7 +9,7 @@ use sp1_sdk::{
     SP1VerifyingKey,
 };
 use std::{collections::HashMap, fmt::Display, future::Future, sync::Arc};
-use tokio::{sync::RwLock, time::Duration};
+use tokio::sync::RwLock;
 
 #[derive(Serialize, Deserialize, Debug)]
 pub struct ValidateConfigRequest {

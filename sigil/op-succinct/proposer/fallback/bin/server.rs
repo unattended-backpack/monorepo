@@ -7,14 +7,14 @@ use axum::{
     routing::{get, post},
     Json, Router,
 };
-use log::{error, info, warn};
+use log::{error, info};
 use op_succinct_client_utils::{
     boot::{hash_rollup_config, BootInfoStruct},
     types::u32_to_u8,
 };
 use op_succinct_fallback_proposer::{
-    AggProofRequest, ProofResponse, ProofStatus, ProofStore, ProofType, SpanProofRequest,
-    SuccinctProposerConfig, ValidateConfigRequest, ValidateConfigResponse, request_with_retries
+    request_with_retries, AggProofRequest, ProofResponse, ProofStatus, ProofStore, ProofType,
+    SpanProofRequest, SuccinctProposerConfig, ValidateConfigRequest, ValidateConfigResponse,
 };
 use op_succinct_host_utils::{
     fetcher::{CacheMode, OPSuccinctDataFetcher, RunContext},
@@ -27,8 +27,8 @@ use sp1_sdk::{
         proto::network::{ExecutionStatus, FulfillmentStatus},
         FulfillmentStrategy,
     },
-    utils, CudaProver, HashableKey, NetworkProver, Prover, ProverClient, SP1Proof, SP1ProofMode,
-    SP1ProofWithPublicValues, SP1ProvingKey, SP1Stdin, SP1_CIRCUIT_VERSION,
+    utils, CudaProver, HashableKey, Prover, ProverClient, SP1Proof, SP1ProofMode,
+    SP1ProofWithPublicValues, SP1Stdin, SP1_CIRCUIT_VERSION,
 };
 use std::{
     collections::HashMap,
@@ -37,10 +37,7 @@ use std::{
     sync::Arc,
     time::{Instant, SystemTime, UNIX_EPOCH},
 };
-use tokio::{
-    sync::RwLock,
-    time::{error::Elapsed, timeout, Duration},
-};
+use tokio::sync::RwLock;
 use tower_http::limit::RequestBodyLimitLayer;
 
 pub const RANGE_ELF: &[u8] = include_bytes!("../../../elf/range-elf");
@@ -228,39 +225,23 @@ async fn request_span_proof(
         )
         .await?
     } else {
-
-
+        // future producing closure
         let network_proof_request = || {
-state.network_prover
-        .prove(&state.range_pk, &sp1_stdin)
-        .compressed()
-        .strategy(state.range_proof_strategy)
-        .skip_simulation(true)
-        .cycle_limit(1_000_000_000_000)
-        .request_async()
-    };
+            state
+                .network_prover
+                .prove(&state.range_pk, &sp1_stdin)
+                .compressed()
+                .strategy(state.range_proof_strategy)
+                .skip_simulation(true)
+                .cycle_limit(1_000_000_000_000)
+                .request_async()
+        };
 
-        match request_with_retries(state.prover_network_retries, 
-            network_proof_request
-).await
-
-        // match request_network_proof_with_retry(
-        //     state.network_prover.clone(),
-        //     state.range_pk,
-        //     state.range_proof_strategy,
-        //     state.retries,
-        //     &sp1_stdin,
-        // )
-        // .await
-        {
-            Ok(network_response) => network_response.map_err(|e| {
-                error!("Failed to request proof: {}", e);
-                AppError(anyhow::anyhow!("Failed to request proof: {}", e))
-            })?,
-            // TODO: this can be errors other than timeout, fix it
-            Err(timeout) => {
-                // TODO: local proof req
-                warn!("Reached timeout before getting a response from prover network: {timeout}. Requesting proof locally.");
+        // request the future a number of times
+        match request_with_retries(state.prover_network_retries, network_proof_request).await {
+            Ok(proof_id) => proof_id,
+            Err(_) => {
+                error!("Prover network request failed. Requesting proof locally.");
 
                 send_proof(
                     ProofType::Span,
@@ -358,7 +339,7 @@ async fn request_agg_proof(
         }
     };
 
-    let stdin =
+    let sp1_stdin =
         match get_agg_proof_stdin(proofs, boot_infos, headers, &state.range_vk, l1_head.into()) {
             Ok(s) => s,
             Err(e) => {
@@ -370,18 +351,39 @@ async fn request_agg_proof(
             }
         };
 
-    let proof_id = match state
-        .network_prover
-        .prove(&state.agg_pk, &stdin)
-        .mode(state.agg_proof_mode)
-        .strategy(state.agg_proof_strategy)
-        .request_async()
-        .await
-    {
-        Ok(id) => id,
-        Err(e) => {
-            error!("Failed to request proof: {}", e);
-            return Err(AppError(anyhow::anyhow!("Failed to request proof: {}", e)));
+    let proof_id = if state.local_proving_only {
+        send_proof(
+            ProofType::Agg,
+            state.proof_store.clone(),
+            state.cuda_prover.clone(),
+            sp1_stdin,
+        )
+        .await?
+    } else {
+        // future producing closure
+        let network_proof_request = || {
+            state
+                .network_prover
+                .prove(&state.agg_pk, &sp1_stdin)
+                .mode(state.agg_proof_mode)
+                .strategy(state.agg_proof_strategy)
+                .request_async()
+        };
+
+        // request the future a number of times
+        match request_with_retries(state.prover_network_retries, network_proof_request).await {
+            Ok(proof_id) => proof_id,
+            Err(_) => {
+                error!("Prover network request failed. Requesting proof locally.");
+
+                send_proof(
+                    ProofType::Agg,
+                    state.proof_store.clone(),
+                    state.cuda_prover.clone(),
+                    sp1_stdin,
+                )
+                .await?
+            }
         }
     };
 
@@ -698,7 +700,6 @@ async fn send_proof(
     sp1_stdin: SP1Stdin,
 ) -> Result<B256, AppError> {
     let proof_id = B256::random();
-    let proof_id_clone = proof_id.clone();
 
     let initial_status = ProofStatus {
         fulfillment_status: 2,
@@ -706,10 +707,7 @@ async fn send_proof(
         proof: Vec::new(),
     };
 
-    proof_store
-        .write()
-        .await
-        .insert(proof_id.clone(), initial_status);
+    proof_store.write().await.insert(proof_id, initial_status);
 
     tokio::spawn(async move {
         let start_time = tokio::time::Instant::now();
@@ -816,7 +814,7 @@ async fn send_proof(
         Ok(())
     });
 
-    Ok(proof_id_clone)
+    Ok(proof_id)
 }
 
 pub struct AppError(anyhow::Error);
