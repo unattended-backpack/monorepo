@@ -916,7 +916,7 @@ impl OPSuccinctDataFetcher {
                 11155420 => 10,
                 10 => 10,
                 8453 => 10,
-                _ => 60,
+                _ => 720,
             };
 
             // Get L1 head.
