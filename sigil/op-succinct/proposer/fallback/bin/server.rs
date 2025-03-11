@@ -512,7 +512,6 @@ async fn request_mock_agg_proof(
 }
 
 /// Get the status of a proof.
-// TODO: request proof locally if we get 3 failures on hitting prover network
 async fn get_proof_status(
     State(state): State<SuccinctProposerConfig>,
     Path(proof_id): Path<String>,
@@ -537,7 +536,7 @@ async fn get_proof_status(
         ));
     }
 
-    if state.local_proving_only == true {
+    if state.local_proving_only {
         // we should never get here.  If we're local proving only and a proof that was requested
         // wasn't found locally we should send a response that prompts the proposer to retry that
         // proof request.
