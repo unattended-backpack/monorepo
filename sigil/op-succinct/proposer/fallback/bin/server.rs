@@ -13,8 +13,9 @@ use op_succinct_client_utils::{
     types::u32_to_u8,
 };
 use op_succinct_fallback_proposer::{
-    request_with_retries, AggProofRequest, ProofResponse, ProofStatus, ProofStore, ProofType,
-    SpanProofRequest, SuccinctProposerConfig, ValidateConfigRequest, ValidateConfigResponse,
+    request_with_retries, AggProofRequest, ProofCache, ProofResponse, ProofStatus, ProofStore,
+    ProofType, SpanProofRequest, SuccinctProposerConfig, ValidateConfigRequest,
+    ValidateConfigResponse,
 };
 use op_succinct_host_utils::{
     fetcher::{CacheMode, OPSuccinctDataFetcher, RunContext},
@@ -100,6 +101,19 @@ async fn main() -> Result<()> {
         _ => 3,
     };
 
+    // the amount of proofs to cache on-disk for persistence
+    // Stores the most recent PROOF_CACHE_MAX_SIZE completed proofs
+    // defaults to 10
+    // setting it to 0 disables the cache
+    let proof_cache_size: usize = match env::var("PROOF_CACHE_MAX_SIZE") {
+        Ok(size) => size
+            .parse()
+            .context("parse PROOF_CACHE_MAX_SIZE as usize")?,
+        _ => 10,
+    };
+
+    let proof_cache = Arc::new(RwLock::new(ProofCache::new(proof_cache_size)));
+
     // Initialize global hashes.
     let global_hashes = SuccinctProposerConfig {
         agg_vkey_hash,
@@ -117,6 +131,7 @@ async fn main() -> Result<()> {
         proof_store,
         cuda_prover,
         local_proving_only,
+        proof_cache,
     };
 
     let app = Router::new()

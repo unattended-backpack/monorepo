@@ -1,7 +1,9 @@
+pub mod proof_cache;
 use alloy_primitives::B256;
 use anyhow::anyhow;
 use base64::{engine::general_purpose, Engine as _};
 use log::error;
+pub use proof_cache::ProofCache;
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_repr::{Deserialize_repr, Serialize_repr};
 use sp1_sdk::{
@@ -109,6 +111,7 @@ pub struct ProofStatus {
 }
 
 pub type ProofStore = Arc<RwLock<HashMap<B256, ProofStatus>>>;
+pub type ProofCacheWrapper = Arc<RwLock<ProofCache>>;
 
 /// Configuration of the L2 Output Oracle contract. Created once at server start-up, monitors if there are any changes
 /// to the contract's configuration.
@@ -131,6 +134,7 @@ pub struct SuccinctProposerConfig {
     pub proof_store: ProofStore,
     pub cuda_prover: Arc<CudaProver>,
     pub local_proving_only: bool,
+    pub proof_cache: ProofCacheWrapper,
 }
 
 /// Deserialize a vector of base64 strings into a vector of vectors of bytes. Go serializes
@@ -184,22 +188,3 @@ where
         last_error.unwrap_or_else(|| anyhow!("Unknown error"))
     ))
 }
-
-// async fn request_with_retries<T, E, Fut, F>(
-//     max_retries: usize,
-//     operation: F,
-// ) -> Result<T, anyhow::Error>
-// where
-//     E: Display,
-//     Fut: Future<Output = Result<T, E>>,
-//     F: Fn() -> Fut,
-// {
-//     let mut retry_num = 0;
-//     while retry_num < max_retries {
-//         match operation.await {
-//             Ok(res) => return Ok(res);
-//         }
-//     }
-//
-//     todo!()
-// }
