@@ -48,11 +48,6 @@ pub struct AggProofRequest {
     pub head: String,
 }
 
-pub enum GenericProofRequest {
-    Span(SpanProofRequest),
-    Agg(AggProofRequest),
-}
-
 #[derive(Deserialize, Serialize, Debug)]
 pub struct MockProofResponse {
     pub proof_id: String,

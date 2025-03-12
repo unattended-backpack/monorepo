@@ -1,15 +1,9 @@
-use crate::{GenericProofRequest, SpanProofRequest};
-use anyhow::{anyhow, Context, Result};
+use crate::SpanProofRequest;
+use anyhow::{Context, Result};
 use log::info;
 
-use super::ProofType;
 use alloy_primitives::B256;
-use std::{
-    collections::{HashMap, HashSet},
-    fs,
-    path::Path,
-    thread::current,
-};
+use std::{collections::HashMap, fs, path::Path};
 
 const PROOF_CACHE_DIR: &str = "proofs";
 
@@ -66,13 +60,17 @@ impl ProofCache {
         self.proof_request_lookup.insert(*proof_id, *proof_request);
     }
 
+    pub fn lookup_proof_request(&self, proof_id: &B256) -> Option<&SpanProofRequest> {
+        self.proof_request_lookup.get(proof_id)
+    }
+
     // If we have a proof locally we can save hours of time by skipping span proof generation.
     // This just returns true if it does indeed exist locally.
     // Careful: Just because it exists doesn't mean it is known by proof_request_lookup.  This is
     // guarded against by returning a proof_id to the proposer and subsequently calling record_proof_request
     // even when we already have the proof locally
     // Called in `request_span_proof`
-    pub fn does_proof_exist_by_request(&self, proof_request: &SpanProofRequest) -> bool {
+    pub fn proof_exists(&self, proof_request: &SpanProofRequest) -> bool {
         // if cache is disabled
         if self.cache_size == 0 {
             return false;
@@ -82,22 +80,6 @@ impl ProofCache {
         let proof_path = Path::new(&proof_path_name);
 
         proof_path.exists()
-    }
-
-    // this one is used in get_proof_status to first check to see if we need to acquire the lock on
-    // proof_cache to do a write_proof().  /get_proof_status is the most hit endpoint so we should be thread friendly
-    // there and avoid requesting the lock if we can.  Call this before calling write_proof to
-    // see if we don't need the lock
-    pub fn does_proof_exist_by_id(&self, proof_id: &B256) -> bool {
-        // if cache is disabled
-        if self.cache_size == 0 {
-            return false;
-        }
-
-        match self.proof_request_lookup.get(proof_id) {
-            Some(proof_request) => self.does_proof_exist_by_request(proof_request),
-            None => false,
-        }
     }
 
     // Retreive a proof that we previously computed.  This can save us hours of proving time.
@@ -137,7 +119,6 @@ impl ProofCache {
     // writes the completed proof to file, deleting the Least Recently Completed proof that the
     // cache is aware of.
     // Takes a mutable reference, so only use this if you're sure the proof isn't already on disk
-    // (i.e. does_proof_exist_by_id(proof_id) returns false)
     pub fn write_proof(&mut self, proof_bytes: Vec<u8>, proof_id: &B256) -> Result<()> {
         // if cache is disabled
         if self.cache_size == 0 {

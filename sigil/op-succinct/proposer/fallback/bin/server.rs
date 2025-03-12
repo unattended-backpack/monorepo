@@ -194,10 +194,12 @@ async fn request_span_proof(
     info!("Received span proof request: {:?}", payload);
 
     let proof_cache = state.proof_cache.read().await;
-    let proof_exists_on_disk = proof_cache.does_proof_exist_by_request(&payload);
+    let proof_exists_on_disk = proof_cache.proof_exists(&payload);
     drop(proof_cache);
 
     let proof_id = if proof_exists_on_disk {
+        // We'll retrieve the proof later in `get_proof_status`.  For now, return a new proof_id to
+        // the proposer
         B256::random()
     } else {
         let fetcher = match OPSuccinctDataFetcher::new_with_rollup_config(RunContext::Docker).await
@@ -245,12 +247,10 @@ async fn request_span_proof(
         route_proof(ProofType::Span, &state, sp1_stdin).await?
     };
 
-    // TODO: can we do this only in the case that the proof exists on-disk??
     // get write copy of proof_cache
     let mut proof_cache = state.proof_cache.write().await;
-    // make sure the proof_request is associated with the proof_id
+    // record all span proof requests in the lookup
     proof_cache.record_proof_request(&proof_id, &payload);
-    drop(proof_cache);
 
     Ok((
         StatusCode::OK,
@@ -572,11 +572,10 @@ async fn get_proof_status(
     // check if this is a proof we're generating locally.  Otherwise check the network for it
     let proof_store = state.proof_store.read().await;
     if let Some(status) = proof_store.get(&proof_id) {
-        // we don't have this in the cache, write it
-        let mut proof_cache = state.proof_cache.write().await;
-        proof_cache
-            .write_proof(status.proof.clone(), &proof_id)
-            .context("write locally constructed proof")?;
+        write_proof_to_cache(&state, status.proof.clone(), &proof_id)
+            .await
+            .context("locally generated proof")?;
+
         return Ok((
             StatusCode::OK,
             Json(ProofStatus {
@@ -586,6 +585,7 @@ async fn get_proof_status(
             }),
         ));
     }
+    drop(proof_store);
 
     if state.local_proving_only {
         // we should never get here.  If we're local proving only and a proof that was requested
@@ -715,11 +715,10 @@ async fn get_proof_status(
                 return Err(AppError(anyhow::anyhow!("unknown proof type: {proof:?}")));
             }
         };
-        // we don't have this proof in the cache, write it
-        let mut proof_cache = state.proof_cache.write().await;
-        proof_cache
-            .write_proof(proof_bytes.clone(), &proof_id)
-            .context("Write prover network proof")?;
+
+        write_proof_to_cache(&state, proof_bytes.clone(), &proof_id)
+            .await
+            .context("locally generated proof")?;
 
         return Ok((
             StatusCode::OK,
@@ -915,6 +914,25 @@ async fn locally_prove(
     });
 
     Ok(proof_id)
+}
+
+async fn write_proof_to_cache(
+    state: &SuccinctProposerConfig,
+    proof_bytes: Vec<u8>,
+    proof_id: &B256,
+) -> Result<()> {
+    // We don't have this proof in the cache, write it if it's a span proof (we don't cache agg
+    // proofs)
+    let mut proof_cache = state.proof_cache.write().await;
+    // We record all span proof requests via `proof_cache.record_proof_request`.  So if it's in
+    // the proof request mapping, it must be a span proof
+    if proof_cache.lookup_proof_request(proof_id).is_some() {
+        proof_cache
+            .write_proof(proof_bytes, proof_id)
+            .context("write locally constructed proof")?;
+    }
+
+    Ok(())
 }
 
 pub struct AppError(anyhow::Error);
