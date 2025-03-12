@@ -103,7 +103,7 @@ impl ProofCache {
     // Retreive a proof that we previously computed.  This can save us hours of proving time.
     // Safe to call even if we're not sure we have a proof.
     // called in get_proof_status()
-    pub fn get_proof(&self, proof_id: &B256) -> Result<Option<Vec<u8>>> {
+    pub fn read_proof(&self, proof_id: &B256) -> Result<Option<Vec<u8>>> {
         // if cache is disabled
         if self.cache_size == 0 {
             return Ok(None);
