@@ -25,7 +25,7 @@ pub struct ValidateConfigResponse {
     pub range_vkey_valid: bool,
 }
 
-#[derive(Deserialize, Serialize, Debug)]
+#[derive(Deserialize, Serialize, Debug, Default, Clone, Copy)]
 pub struct SpanProofRequest {
     pub start: u64,
     pub end: u64,

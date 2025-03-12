@@ -1,6 +1,9 @@
 # MacOS dust
 .DS_Store
 
+# default proof cache
+/proofs
+
 # build output
 /target
 

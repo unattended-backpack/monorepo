@@ -112,7 +112,9 @@ async fn main() -> Result<()> {
         _ => 10,
     };
 
-    let proof_cache = Arc::new(RwLock::new(ProofCache::new(proof_cache_size)));
+    let proof_cache = Arc::new(RwLock::new(
+        ProofCache::new(proof_cache_size).context("Create proof cache")?,
+    ));
 
     // Initialize global hashes.
     let global_hashes = SuccinctProposerConfig {
@@ -231,7 +233,22 @@ async fn request_span_proof(
         }
     };
 
-    let proof_id = route_proof(ProofType::Span, &state, sp1_stdin).await?;
+    // get read only copy of proof cache
+    let proof_cache = state.proof_cache.read().await;
+    let proof_exists_on_disk = proof_cache.does_proof_exist_by_request(&payload);
+    let proof_exists_in_memory = proof_cache.drop(proof_cache);
+
+    let proof_id = if proof_exists_on_disk {
+        // a proof with these parameters exists on disk from a previous run, skip proof generation
+        // generate a new proof_id, put it into the cache,
+        B256::random()
+    } else {
+        route_proof(ProofType::Span, &state, sp1_stdin).await?
+    };
+
+    // get write lock
+    let mut proof_cache = state.proof_cache.write().await;
+    proof_cache.record_proof_request(&proof_id, &payload);
 
     Ok((
         StatusCode::OK,
