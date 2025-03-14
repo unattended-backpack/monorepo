@@ -575,9 +575,16 @@ async fn get_proof_status(
     // check if this is a proof we're generating locally.  Otherwise check the network for it
     let proof_store = state.proof_store.read().await;
     if let Some(status) = proof_store.get(&proof_id) {
-        write_proof_to_cache(&state, status.proof.clone(), &proof_id)
-            .await
-            .context("locally generated proof")?;
+        // if the proof is done, write it to the cache
+        if status.fulfillment_status == FulfillmentStatus::Fulfilled.into() {
+            info!(
+                "Writing local proof with size {} to cache",
+                status.proof.len()
+            );
+            write_proof_to_cache(&state, status.proof.clone(), &proof_id)
+                .await
+                .context("locally generated proof")?;
+        }
 
         return Ok((
             StatusCode::OK,
@@ -721,7 +728,7 @@ async fn get_proof_status(
 
         write_proof_to_cache(&state, proof_bytes.clone(), &proof_id)
             .await
-            .context("locally generated proof")?;
+            .context("network proof")?;
 
         return Ok((
             StatusCode::OK,
@@ -929,7 +936,7 @@ async fn write_proof_to_cache(
     // proofs)
     let mut proof_cache = state.proof_cache.write().await;
     // We record all span proof requests via `proof_cache.record_proof_request`.  So if it's in
-    // the proof request mapping, it must be a span proof
+    // the proof request mapping, it must be a span proof.  We only want to cache span proofs
     if proof_cache.lookup_proof_request(proof_id).is_some() {
         proof_cache
             .write_proof(proof_bytes, proof_id)

@@ -125,6 +125,11 @@ impl ProofCache {
             return Ok(());
         }
 
+        info!(
+            "num proof bytes in write proof in cache: {}",
+            proof_bytes.len()
+        );
+
         // overwrite the current_cache_index of cache_list
         let elem = self
             .cache_list
