@@ -576,7 +576,8 @@ async fn get_proof_status(
     let proof_store = state.proof_store.read().await;
     if let Some(status) = proof_store.get(&proof_id) {
         // if the proof is done, write it to the cache
-        if status.fulfillment_status == FulfillmentStatus::Fulfilled.into() {
+        // (execution_status 2 = executed)
+        if status.execution_status == 2 {
             info!(
                 "Writing local proof with size {} to cache",
                 status.proof.len()
