@@ -1609,6 +1609,30 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7c74b8349d32d297c9134b8c88677813a227df8f779daa29bfc29c183fe3dca6"
 
 [[package]]
+name = "coordinator"
+version = "0.1.0"
+dependencies = [
+ "alloy-primitives",
+ "anyhow",
+ "axum",
+ "base64 0.22.1",
+ "bincode",
+ "csv",
+ "dotenv",
+ "log",
+ "network-lib",
+ "op-succinct-build-utils",
+ "op-succinct-client-utils",
+ "op-succinct-host-utils",
+ "serde",
+ "serde_json",
+ "serde_repr",
+ "sp1-sdk",
+ "tokio",
+ "tower-http",
+]
+
+[[package]]
 name = "core-foundation"
 version = "0.9.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3778,6 +3802,29 @@ dependencies = [
  "security-framework 2.11.1",
  "security-framework-sys",
  "tempfile",
+]
+
+[[package]]
+name = "network-lib"
+version = "0.1.0"
+dependencies = [
+ "alloy-primitives",
+ "anyhow",
+ "axum",
+ "base64 0.22.1",
+ "bincode",
+ "csv",
+ "dotenv",
+ "log",
+ "op-succinct-build-utils",
+ "op-succinct-client-utils",
+ "op-succinct-host-utils",
+ "serde",
+ "serde_json",
+ "serde_repr",
+ "sp1-sdk",
+ "tokio",
+ "tower-http",
 ]
 
 [[package]]
@@ -7957,6 +8004,10 @@ checksum = "3268f3d866458b787f390cf61f4bbb563b922d091359f9608842999eaee3943c"
 dependencies = [
  "bitflags",
 ]
+
+[[package]]
+name = "worker"
+version = "0.1.0"
 
 [[package]]
 name = "write16"
