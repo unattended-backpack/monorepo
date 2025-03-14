@@ -198,6 +198,7 @@ async fn request_span_proof(
     drop(proof_cache);
 
     let proof_id = if proof_exists_on_disk {
+        info!("Span proof for request {:?} found on disk", payload);
         // We'll retrieve the proof later in `get_proof_status`.  For now, return a new proof_id to
         // the proposer
         B256::random()
@@ -246,6 +247,8 @@ async fn request_span_proof(
 
         route_proof(ProofType::Span, &state, sp1_stdin).await?
     };
+
+    info!("Assigned id {proof_id} to span proof request {:?}", payload);
 
     // get write copy of proof_cache
     let mut proof_cache = state.proof_cache.write().await;
@@ -765,6 +768,7 @@ async fn route_proof(
         )
         .await
     } else {
+        info!("Making network request for {} proof", proof_type);
         let prover_network_response = match proof_type {
             ProofType::Span => {
                 let network_request = || {
