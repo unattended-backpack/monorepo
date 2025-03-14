@@ -1,6 +1,11 @@
 pub mod proof_cache;
+
 use alloy_primitives::B256;
 use anyhow::anyhow;
+use axum::{
+    http::StatusCode,
+    response::{IntoResponse, Response},
+};
 use base64::{engine::general_purpose, Engine as _};
 use log::error;
 pub use proof_cache::ProofCache;
@@ -132,6 +137,21 @@ pub struct SuccinctProposerConfig {
     pub proof_cache: ProofCacheWrapper,
 }
 
+#[derive(Clone)]
+pub struct WorkerState {
+    pub range_vk: Arc<SP1VerifyingKey>,
+    // pub range_pk: Arc<SP1ProvingKey>,
+    // pub agg_pk: Arc<SP1ProvingKey>,
+    // pub agg_vk: Arc<SP1VerifyingKey>,
+    // pub agg_vkey_hash: B256,
+    // pub range_vkey_commitment: B256,
+    // pub rollup_config_hash: B256,
+    // pub range_proof_strategy: FulfillmentStrategy,
+    // pub agg_proof_strategy: FulfillmentStrategy,
+    // pub agg_proof_mode: SP1ProofMode,
+    pub cuda_prover: Arc<CudaProver>,
+}
+
 /// Deserialize a vector of base64 strings into a vector of vectors of bytes. Go serializes
 /// the subproofs as base64 strings.
 fn deserialize_base64_vec<'de, D>(deserializer: D) -> Result<Vec<Vec<u8>>, D::Error>
@@ -182,4 +202,21 @@ where
         max_retries,
         last_error.unwrap_or_else(|| anyhow!("Unknown error"))
     ))
+}
+
+pub struct AppError(pub anyhow::Error);
+
+impl IntoResponse for AppError {
+    fn into_response(self) -> Response {
+        (StatusCode::INTERNAL_SERVER_ERROR, format!("{}", self.0)).into_response()
+    }
+}
+
+impl<E> From<E> for AppError
+where
+    E: Into<anyhow::Error>,
+{
+    fn from(err: E) -> Self {
+        Self(err.into())
+    }
 }

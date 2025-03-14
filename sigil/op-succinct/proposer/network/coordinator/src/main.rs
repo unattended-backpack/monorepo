@@ -4,14 +4,13 @@ use anyhow::{Context, Result};
 use axum::{
     extract::{DefaultBodyLimit, Path, State},
     http::StatusCode,
-    response::{IntoResponse, Response},
     routing::{get, post},
     Json, Router,
 };
 use log::{error, info};
 use network_lib::{
-    request_with_retries, AggProofRequest, ProofCache, ProofResponse, ProofStatus, ProofStore,
-    ProofType, SpanProofRequest, SuccinctProposerConfig, ValidateConfigRequest,
+    request_with_retries, AggProofRequest, AppError, ProofCache, ProofResponse, ProofStatus,
+    ProofStore, ProofType, SpanProofRequest, SuccinctProposerConfig, ValidateConfigRequest,
     ValidateConfigResponse,
 };
 use op_succinct_client_utils::{
@@ -946,21 +945,4 @@ async fn write_proof_to_cache(
     }
 
     Ok(())
-}
-
-pub struct AppError(anyhow::Error);
-
-impl IntoResponse for AppError {
-    fn into_response(self) -> Response {
-        (StatusCode::INTERNAL_SERVER_ERROR, format!("{}", self.0)).into_response()
-    }
-}
-
-impl<E> From<E> for AppError
-where
-    E: Into<anyhow::Error>,
-{
-    fn from(err: E) -> Self {
-        Self(err.into())
-    }
 }

@@ -8008,6 +8008,26 @@ dependencies = [
 [[package]]
 name = "worker"
 version = "0.1.0"
+dependencies = [
+ "alloy-primitives",
+ "anyhow",
+ "axum",
+ "base64 0.22.1",
+ "bincode",
+ "csv",
+ "dotenv",
+ "log",
+ "network-lib",
+ "op-succinct-build-utils",
+ "op-succinct-client-utils",
+ "op-succinct-host-utils",
+ "serde",
+ "serde_json",
+ "serde_repr",
+ "sp1-sdk",
+ "tokio",
+ "tower-http",
+]
 
 [[package]]
 name = "write16"

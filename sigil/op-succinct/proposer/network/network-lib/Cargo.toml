@@ -14,7 +14,6 @@ alloy-primitives = { workspace = true, features = [
 	"getrandom",
 ] } #alloy-primitives.workspace = true
 
-
 # local
 op-succinct-host-utils.workspace = true
 
