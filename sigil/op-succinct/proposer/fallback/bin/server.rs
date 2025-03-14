@@ -13,8 +13,9 @@ use op_succinct_client_utils::{
     types::u32_to_u8,
 };
 use op_succinct_fallback_proposer::{
-    request_with_retries, AggProofRequest, ProofResponse, ProofStatus, ProofStore, ProofType,
-    SpanProofRequest, SuccinctProposerConfig, ValidateConfigRequest, ValidateConfigResponse,
+    request_with_retries, AggProofRequest, ProofCache, ProofResponse, ProofStatus, ProofStore,
+    ProofType, SpanProofRequest, SuccinctProposerConfig, ValidateConfigRequest,
+    ValidateConfigResponse,
 };
 use op_succinct_host_utils::{
     fetcher::{CacheMode, OPSuccinctDataFetcher, RunContext},
@@ -100,6 +101,21 @@ async fn main() -> Result<()> {
         _ => 3,
     };
 
+    // the amount of proofs to cache on-disk for persistence
+    // Stores the most recent PROOF_CACHE_MAX_SIZE completed proofs
+    // defaults to 10
+    // setting it to 0 disables the cache
+    let proof_cache_size: usize = match env::var("PROOF_CACHE_MAX_SIZE") {
+        Ok(size) => size
+            .parse()
+            .context("parse PROOF_CACHE_MAX_SIZE as usize")?,
+        _ => 10,
+    };
+
+    let proof_cache = Arc::new(RwLock::new(
+        ProofCache::new(proof_cache_size).context("Create proof cache")?,
+    ));
+
     // Initialize global hashes.
     let global_hashes = SuccinctProposerConfig {
         agg_vkey_hash,
@@ -117,6 +133,7 @@ async fn main() -> Result<()> {
         proof_store,
         cuda_prover,
         local_proving_only,
+        proof_cache,
     };
 
     let app = Router::new()
@@ -175,48 +192,68 @@ async fn request_span_proof(
     Json(payload): Json<SpanProofRequest>,
 ) -> Result<(StatusCode, Json<ProofResponse>), AppError> {
     info!("Received span proof request: {:?}", payload);
-    let fetcher = match OPSuccinctDataFetcher::new_with_rollup_config(RunContext::Docker).await {
-        Ok(f) => f,
-        Err(e) => {
-            error!("Failed to create data fetcher: {}", e);
-            return Err(AppError(e));
-        }
+
+    let proof_cache = state.proof_cache.read().await;
+    let proof_exists_on_disk = proof_cache.proof_exists(&payload);
+    drop(proof_cache);
+
+    let proof_id = if proof_exists_on_disk {
+        info!("Span proof for request {:?} found on disk", payload);
+        // We'll retrieve the proof later in `get_proof_status`.  For now, return a new proof_id to
+        // the proposer
+        B256::random()
+    } else {
+        let fetcher = match OPSuccinctDataFetcher::new_with_rollup_config(RunContext::Docker).await
+        {
+            Ok(f) => f,
+            Err(e) => {
+                error!("Failed to create data fetcher: {}", e);
+                return Err(AppError(e));
+            }
+        };
+
+        let host_args = match fetcher
+            .get_host_args(
+                payload.start,
+                payload.end,
+                None,
+                ProgramType::Multi,
+                CacheMode::DeleteCache,
+            )
+            .await
+        {
+            Ok(cli) => cli,
+            Err(e) => {
+                error!("Failed to get host CLI args: {}", e);
+                return Err(AppError(anyhow::anyhow!(
+                    "Failed to get host CLI args: {}",
+                    e
+                )));
+            }
+        };
+
+        let mem_kv_store = start_server_and_native_client(host_args).await?;
+
+        let sp1_stdin = match get_proof_stdin(mem_kv_store) {
+            Ok(stdin) => stdin,
+            Err(e) => {
+                error!("Failed to get proof stdin: {}", e);
+                return Err(AppError(anyhow::anyhow!(
+                    "Failed to get proof stdin: {}",
+                    e
+                )));
+            }
+        };
+
+        route_proof(ProofType::Span, &state, sp1_stdin).await?
     };
 
-    let host_args = match fetcher
-        .get_host_args(
-            payload.start,
-            payload.end,
-            None,
-            ProgramType::Multi,
-            CacheMode::DeleteCache,
-        )
-        .await
-    {
-        Ok(cli) => cli,
-        Err(e) => {
-            error!("Failed to get host CLI args: {}", e);
-            return Err(AppError(anyhow::anyhow!(
-                "Failed to get host CLI args: {}",
-                e
-            )));
-        }
-    };
+    info!("Assigned id {proof_id} to span proof request {:?}", payload);
 
-    let mem_kv_store = start_server_and_native_client(host_args).await?;
-
-    let sp1_stdin = match get_proof_stdin(mem_kv_store) {
-        Ok(stdin) => stdin,
-        Err(e) => {
-            error!("Failed to get proof stdin: {}", e);
-            return Err(AppError(anyhow::anyhow!(
-                "Failed to get proof stdin: {}",
-                e
-            )));
-        }
-    };
-
-    let proof_id = route_proof(ProofType::Span, &state, sp1_stdin).await?;
+    // get write copy of proof_cache
+    let mut proof_cache = state.proof_cache.write().await;
+    // record all span proof requests in the lookup
+    proof_cache.record_proof_request(&proof_id, &payload);
 
     Ok((
         StatusCode::OK,
@@ -521,11 +558,35 @@ async fn get_proof_status(
     let proof_id_bytes = hex::decode(&proof_id)?;
     let proof_id = B256::from_slice(&proof_id_bytes);
 
-    // request read-only copy of proof_store
-    let proof_store = state.proof_store.read().await;
+    // first, check to see if it's a proof we have stored in the cache
+    let proof_cache = state.proof_cache.read().await;
+    if let Some(proof_bytes) = proof_cache.read_proof(&proof_id).context("read proof")? {
+        return Ok((
+            StatusCode::OK,
+            Json(ProofStatus {
+                fulfillment_status: FulfillmentStatus::Fulfilled.into(),
+                execution_status: ExecutionStatus::Executed.into(),
+                proof: proof_bytes,
+            }),
+        ));
+    }
+    drop(proof_cache);
 
-    // first check if this is a proof we're generating locally.  Otherwise check the network for it
+    // check if this is a proof we're generating locally.  Otherwise check the network for it
+    let proof_store = state.proof_store.read().await;
     if let Some(status) = proof_store.get(&proof_id) {
+        // if the proof is done, write it to the cache
+        // (execution_status 2 = executed)
+        if status.execution_status == 2 {
+            info!(
+                "Writing local proof with size {} to cache",
+                status.proof.len()
+            );
+            write_proof_to_cache(&state, status.proof.clone(), &proof_id)
+                .await
+                .context("locally generated proof")?;
+        }
+
         return Ok((
             StatusCode::OK,
             Json(ProofStatus {
@@ -535,6 +596,7 @@ async fn get_proof_status(
             }),
         ));
     }
+    drop(proof_store);
 
     if state.local_proving_only {
         // we should never get here.  If we're local proving only and a proof that was requested
@@ -644,47 +706,39 @@ async fn get_proof_status(
     if fulfillment_status == FulfillmentStatus::Fulfilled as i32 {
         let proof: SP1ProofWithPublicValues = maybe_proof.unwrap();
 
-        match proof.proof {
+        let proof_bytes = match proof.proof {
             SP1Proof::Compressed(_) => {
                 // If it's a compressed proof, we need to serialize the entire struct with bincode.
                 // Note: We're re-serializing the entire struct with bincode here, but this is fine
                 // because we're on localhost and the size of the struct is small.
-                let proof_bytes = bincode::serialize(&proof).unwrap();
-                return Ok((
-                    StatusCode::OK,
-                    Json(ProofStatus {
-                        fulfillment_status,
-                        execution_status,
-                        proof: proof_bytes,
-                    }),
-                ));
+                bincode::serialize(&proof).unwrap()
             }
             SP1Proof::Groth16(_) => {
                 // If it's a groth16 proof, we need to get the proof bytes that we put on-chain.
-                let proof_bytes = proof.bytes();
-                return Ok((
-                    StatusCode::OK,
-                    Json(ProofStatus {
-                        fulfillment_status,
-                        execution_status,
-                        proof: proof_bytes,
-                    }),
-                ));
+                proof.bytes()
             }
             SP1Proof::Plonk(_) => {
                 // If it's a plonk proof, we need to get the proof bytes that we put on-chain.
-                let proof_bytes = proof.bytes();
-                return Ok((
-                    StatusCode::OK,
-                    Json(ProofStatus {
-                        fulfillment_status,
-                        execution_status,
-                        proof: proof_bytes,
-                    }),
-                ));
+                proof.bytes()
             }
-            _ => (),
-        }
+            _ => {
+                log::error!("unknown proof type: {proof:?}");
+                return Err(AppError(anyhow::anyhow!("unknown proof type: {proof:?}")));
+            }
+        };
+
+        write_proof_to_cache(&state, proof_bytes.clone(), &proof_id)
+            .await
+            .context("network proof")?;
+
+        return Ok((
+            StatusCode::OK,
+            Json(ProofStatus {
+                fulfillment_status,
+                execution_status,
+                proof: proof_bytes,
+            }),
+        ));
     } else if fulfillment_status == FulfillmentStatus::Unfulfillable as i32 {
         return Ok((
             StatusCode::OK,
@@ -722,6 +776,7 @@ async fn route_proof(
         )
         .await
     } else {
+        info!("Making network request for {} proof", proof_type);
         let prover_network_response = match proof_type {
             ProofType::Span => {
                 let network_request = || {
@@ -871,6 +926,25 @@ async fn locally_prove(
     });
 
     Ok(proof_id)
+}
+
+async fn write_proof_to_cache(
+    state: &SuccinctProposerConfig,
+    proof_bytes: Vec<u8>,
+    proof_id: &B256,
+) -> Result<()> {
+    // We don't have this proof in the cache, write it if it's a span proof (we don't cache agg
+    // proofs)
+    let mut proof_cache = state.proof_cache.write().await;
+    // We record all span proof requests via `proof_cache.record_proof_request`.  So if it's in
+    // the proof request mapping, it must be a span proof.  We only want to cache span proofs
+    if proof_cache.lookup_proof_request(proof_id).is_some() {
+        proof_cache
+            .write_proof(proof_bytes, proof_id)
+            .context("write locally constructed proof")?;
+    }
+
+    Ok(())
 }
 
 pub struct AppError(anyhow::Error);
