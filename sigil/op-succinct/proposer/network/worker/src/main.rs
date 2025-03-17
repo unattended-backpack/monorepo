@@ -1,6 +1,6 @@
 use alloy_primitives::{hex, B256};
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use axum::{
     extract::{DefaultBodyLimit, Path, State},
     http::StatusCode,
@@ -9,18 +9,30 @@ use axum::{
 };
 use log::{error, info};
 use network_lib::{
-    AggProofRequest, AppError, ProofResponse, ProofStatus, SpanProofRequest, WorkerState,
+    AppError, ProofStatus, ProofStore, ProofType, WorkerAggProofRequest, WorkerInfo,
+    WorkerSpanProofRequest, WorkerState,
 };
 use op_succinct_client_utils::boot::BootInfoStruct;
 use op_succinct_host_utils::{
     fetcher::{CacheMode, OPSuccinctDataFetcher, RunContext},
     get_agg_proof_stdin, get_proof_stdin, start_server_and_native_client, ProgramType,
 };
-use sp1_sdk::{utils, Prover, ProverClient, SP1Proof, SP1ProofWithPublicValues};
-use std::{env, sync::Arc};
+use reqwest::Client;
+use sp1_sdk::{
+    network::proto::network::{ExecutionStatus, FulfillmentStatus},
+    utils, CudaProver, Prover, ProverClient, SP1Proof, SP1ProofWithPublicValues, SP1Stdin,
+};
+use std::{collections::HashMap, env, sync::Arc};
+use tokio::{
+    sync::RwLock,
+    time::{sleep, Duration},
+};
 use tower_http::limit::RequestBodyLimitLayer;
-pub const RANGE_ELF: &[u8] = include_bytes!("../../../../elf/range-elf");
-pub const AGG_ELF: &[u8] = include_bytes!("../../../../elf/aggregation-elf");
+
+const WORKER_REGISTER_ENDPOINT: &str = "worker-ready";
+
+const RANGE_ELF: &[u8] = include_bytes!("../../../../elf/range-elf");
+const AGG_ELF: &[u8] = include_bytes!("../../../../elf/aggregation-elf");
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -35,11 +47,17 @@ async fn main() -> Result<()> {
     let (_range_pk, range_vk) = cuda_prover.setup(RANGE_ELF);
     let (_agg_pk, _agg_vk) = cuda_prover.setup(AGG_ELF);
 
+    let proof_store = Arc::new(RwLock::new(HashMap::new()));
+
     // local cuda prover setup for fallback
     let cuda_prover = Arc::new(ProverClient::builder().cuda().build());
 
+    let coordinator_address =
+        env::var("COORDINATOR_ADDRESS").context("Set COORDINATOR_ADDRESS in .env")?;
+
     let worker_state = WorkerState {
         range_vk: Arc::new(range_vk),
+        proof_store,
         cuda_prover,
     };
 
@@ -55,17 +73,65 @@ async fn main() -> Result<()> {
     let listener = tokio::net::TcpListener::bind(format!("0.0.0.0:{}", port))
         .await
         .unwrap();
+    let local_addr = listener.local_addr().unwrap();
 
-    // TODO: send a ping of 'ready' to the coordinator
-    info!("Server listening on {}", listener.local_addr().unwrap());
+    // Send a "ready" notification to the coordinator
+    tokio::spawn(async move {
+        // Give this server a moment to fully initialize
+        sleep(Duration::from_secs(1)).await;
+
+        // TODO: is it a vulnerability to send this info over the network
+        let client = Client::new();
+        let worker_info = WorkerInfo {
+            ip: local_addr.ip().to_string(),
+            port: local_addr.port(),
+        };
+
+        // Attempt to register with the coordinator
+        match client
+            .post(format!(
+                "{}/{WORKER_REGISTER_ENDPOINT}",
+                coordinator_address
+            ))
+            .json(&worker_info)
+            .send()
+            .await
+        {
+            Ok(response) => {
+                if response.status().is_success() {
+                    info!(
+                        "Successfully registered with coordinator at {}",
+                        coordinator_address
+                    );
+                } else {
+                    error!(
+                        "Failed to register with coordinator: HTTP {}",
+                        response.status()
+                    );
+                }
+            }
+            Err(err) => {
+                error!("Failed to connect to coordinator: {}", err);
+            }
+        }
+    });
+
+    info!(
+        "Worker server listening on {}",
+        listener.local_addr().unwrap()
+    );
     axum::serve(listener, app).await?;
     Ok(())
 }
 
 async fn request_span_proof(
     State(state): State<WorkerState>,
-    Json(payload): Json<SpanProofRequest>,
-) -> Result<(StatusCode, Json<ProofResponse>), AppError> {
+    Json(payload): Json<WorkerSpanProofRequest>,
+) -> Result<StatusCode, AppError> {
+    info!(
+        "Received span proof request for range {}, {} with id {}",
+        payload.start, payload.end, payload.proof_id
+    );
     let fetcher = match OPSuccinctDataFetcher::new_with_rollup_config(RunContext::Docker).await {
         Ok(f) => f,
         Err(e) => {
@@ -107,27 +173,24 @@ async fn request_span_proof(
         }
     };
 
-    let (proving_key, _) = state.cuda_prover.setup(RANGE_ELF);
-    // TODO: don't await, spawn a task
-    state
-        .cuda_prover
-        .prove(&proving_key, &sp1_stdin)
-        .compressed()
-        .run()?;
+    locally_prove(
+        payload.proof_id,
+        ProofType::Span,
+        state.proof_store.clone(),
+        state.cuda_prover.clone(),
+        sp1_stdin,
+    )
+    .await?;
 
-    let proof_id = B256::random();
-    Ok((
-        StatusCode::OK,
-        Json(ProofResponse {
-            proof_id: proof_id.to_vec(),
-        }),
-    ))
+    Ok(StatusCode::OK)
 }
 
 async fn request_agg_proof(
     State(state): State<WorkerState>,
-    Json(payload): Json<AggProofRequest>,
-) -> Result<(StatusCode, Json<ProofResponse>), AppError> {
+    Json(payload): Json<WorkerAggProofRequest>,
+) -> Result<StatusCode, AppError> {
+    info!("Received agg proof request with id {:?}", payload.proof_id);
+
     let mut proofs_with_pv: Vec<SP1ProofWithPublicValues> = payload
         .subproofs
         .iter()
@@ -211,26 +274,158 @@ async fn request_agg_proof(
             }
         };
 
-    let (proving_key, _) = state.cuda_prover.setup(AGG_ELF);
-    // TODO: spawn a task
-    state
-        .cuda_prover
-        .prove(&proving_key, &sp1_stdin)
-        .groth16()
-        .run()?;
+    locally_prove(
+        payload.proof_id,
+        ProofType::Agg,
+        state.proof_store.clone(),
+        state.cuda_prover.clone(),
+        sp1_stdin,
+    )
+    .await?;
 
-    let proof_id = B256::random();
-    Ok((
-        StatusCode::OK,
-        Json(ProofResponse {
-            proof_id: proof_id.to_vec(),
-        }),
-    ))
+    Ok(StatusCode::OK)
 }
 
 async fn get_proof_status(
     State(state): State<WorkerState>,
     Path(proof_id): Path<String>,
 ) -> Result<(StatusCode, Json<ProofStatus>), AppError> {
-    todo!()
+    let proof_id_bytes = hex::decode(&proof_id)?;
+    let proof_id = B256::from_slice(&proof_id_bytes);
+    info!("Received proof status request: {:?}", proof_id);
+
+    // check if this is a proof we're generating locally.  Otherwise check the network for it
+    let proof_store = state.proof_store.read().await;
+    match proof_store.get(&proof_id) {
+        Some(status) => {
+            info!("Proof status of {proof_id}: {}", status);
+            Ok((
+                StatusCode::OK,
+                Json(ProofStatus {
+                    fulfillment_status: status.fulfillment_status,
+                    execution_status: status.execution_status,
+                    proof: status.proof.clone(),
+                }),
+            ))
+        }
+        None => {
+            error!("Proof {} not found locally", proof_id);
+            Ok((
+                StatusCode::OK,
+                Json(ProofStatus {
+                    fulfillment_status: FulfillmentStatus::UnspecifiedFulfillmentStatus.into(),
+                    execution_status: ExecutionStatus::UnspecifiedExecutionStatus.into(),
+                    proof: vec![],
+                }),
+            ))
+        }
+    }
+}
+
+// spawns a process that creates a proof locally
+// runs proof in a background thread.  Only needs to be async because of
+// proof_store.write().await
+async fn locally_prove(
+    proof_id: B256,
+    proof_type: ProofType,
+    proof_store: ProofStore,
+    cuda_prover: Arc<CudaProver>,
+    sp1_stdin: SP1Stdin,
+) -> Result<(), AppError> {
+    let initial_status = ProofStatus {
+        fulfillment_status: FulfillmentStatus::Assigned.into(),
+        execution_status: ExecutionStatus::Unexecuted.into(),
+        proof: Vec::new(),
+    };
+
+    proof_store.write().await.insert(proof_id, initial_status);
+
+    tokio::spawn(async move {
+        let start_time = tokio::time::Instant::now();
+        info!("computing {proof_type} proof with id {:?}", proof_id);
+
+        let proof_res = match proof_type {
+            ProofType::Span => {
+                // the cuda prover keeps state of the last `setup()` that was called on it.
+                // You must call `setup()` then `prove` *each* time you intend to
+                // prove a certain program
+                let (proving_key, _) = cuda_prover.setup(RANGE_ELF);
+                cuda_prover
+                    .prove(&proving_key, &sp1_stdin)
+                    .compressed()
+                    .run()
+            }
+            ProofType::Agg => {
+                // the cuda prover keeps state of the last `setup()` that was called on it.
+                // You must call `setup()` then `prove` *each* time you intend to
+                // prove a certain program
+                let (proving_key, _) = cuda_prover.setup(AGG_ELF);
+                cuda_prover.prove(&proving_key, &sp1_stdin).groth16().run()
+            }
+        };
+
+        let proof_status = match proof_res {
+            // proof is done, can return it
+            Ok(proof) => {
+                match proof.proof {
+                    SP1Proof::Compressed(_) => {
+                        // If it's a compressed proof, we need to serialize the entire struct with bincode.
+                        // Note: We're re-serializing the entire struct with bincode here, but this is fine
+                        // because we're on localhost and the size of the struct is small.
+                        let proof_bytes = bincode::serialize(&proof).unwrap();
+                        ProofStatus {
+                            fulfillment_status: FulfillmentStatus::Fulfilled.into(),
+                            execution_status: ExecutionStatus::Executed.into(),
+                            proof: proof_bytes,
+                        }
+                    }
+                    SP1Proof::Groth16(_) => {
+                        // If it's a groth16 proof, we need to get the proof bytes that we put on-chain.
+                        let proof_bytes = proof.bytes();
+                        ProofStatus {
+                            fulfillment_status: FulfillmentStatus::Fulfilled.into(),
+                            execution_status: ExecutionStatus::Executed.into(),
+                            proof: proof_bytes,
+                        }
+                    }
+                    SP1Proof::Plonk(_) => {
+                        // If it's a plonk proof, we need to get the proof bytes that we put on-chain.
+                        let proof_bytes = proof.bytes();
+                        ProofStatus {
+                            fulfillment_status: FulfillmentStatus::Fulfilled.into(),
+                            execution_status: ExecutionStatus::Executed.into(),
+                            proof: proof_bytes,
+                        }
+                    }
+                    _ => {
+                        error!("unknown proof type: {proof:?}");
+                        ProofStatus {
+                            fulfillment_status: FulfillmentStatus::Unfulfillable.into(),
+                            execution_status: ExecutionStatus::Unexecutable.into(),
+                            proof: vec![],
+                        }
+                        // return Err(AppError(anyhow::anyhow!("unknown proof type: {proof:?}")));
+                    }
+                }
+            }
+            Err(e) => {
+                error!("error proving {e}");
+                ProofStatus {
+                    fulfillment_status: FulfillmentStatus::Unfulfillable.into(),
+                    execution_status: ExecutionStatus::Unexecutable.into(),
+                    proof: vec![],
+                }
+                // return Err(AppError(anyhow::anyhow!("error proving {e}")));
+            }
+        };
+
+        info!("{proof_type} proof {proof_status}. id {proof_id}");
+        let minutes = start_time.elapsed().as_secs_f64() / 60.0;
+        info!("Time to complete {proof_type} proof: {} minutes", minutes);
+
+        // update proof store
+        proof_store.write().await.insert(proof_id, proof_status);
+    });
+
+    Ok(())
 }

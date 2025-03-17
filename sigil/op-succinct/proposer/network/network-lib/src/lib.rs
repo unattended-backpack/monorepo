@@ -36,6 +36,13 @@ pub struct SpanProofRequest {
     pub end: u64,
 }
 
+#[derive(Deserialize, Serialize, Debug, Default, Clone, Copy)]
+pub struct WorkerSpanProofRequest {
+    pub proof_id: B256,
+    pub start: u64,
+    pub end: u64,
+}
+
 impl Display for SpanProofRequest {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
@@ -48,6 +55,14 @@ impl Display for SpanProofRequest {
 
 #[derive(Deserialize, Serialize, Debug)]
 pub struct AggProofRequest {
+    #[serde(deserialize_with = "deserialize_base64_vec")]
+    pub subproofs: Vec<Vec<u8>>,
+    pub head: String,
+}
+
+#[derive(Deserialize, Serialize, Debug)]
+pub struct WorkerAggProofRequest {
+    pub proof_id: B256,
     #[serde(deserialize_with = "deserialize_base64_vec")]
     pub subproofs: Vec<Vec<u8>>,
     pub head: String,
@@ -110,7 +125,40 @@ pub struct ProofStatus {
     pub proof: Vec<u8>,
 }
 
+impl Display for ProofStatus {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let fulfillment_status = match self.fulfillment_status {
+            0 => "UnspecifiedFulfillmentStatus",
+            1 => "Requested",
+            2 => "Assigned",
+            3 => "Fulfilled",
+            4 => "Unfulfillable",
+            _ => "Error: Unknown fulfillment status",
+        };
+
+        let execution_status = match self.execution_status {
+            0 => "UnspecifiedExecutionStatus",
+            1 => "Unexecuted",
+            2 => "Executed",
+            3 => "Unexecutable",
+            _ => "Error: Unknown execution execution status",
+        };
+        let proof_display = if self.proof.is_empty() {
+            "Empty"
+        } else {
+            "Non-empty"
+        };
+
+        write!(
+            f,
+            "FulfillmentStatus: {}, ExecutionStatus: {}, Proof: {}",
+            fulfillment_status, execution_status, proof_display
+        )
+    }
+}
+
 pub type ProofStore = Arc<RwLock<HashMap<B256, ProofStatus>>>;
+
 pub type ProofCacheWrapper = Arc<RwLock<ProofCache>>;
 
 /// Configuration of the L2 Output Oracle contract. Created once at server start-up, monitors if there are any changes
@@ -149,7 +197,14 @@ pub struct WorkerState {
     // pub range_proof_strategy: FulfillmentStrategy,
     // pub agg_proof_strategy: FulfillmentStrategy,
     // pub agg_proof_mode: SP1ProofMode,
+    pub proof_store: ProofStore,
     pub cuda_prover: Arc<CudaProver>,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+pub struct WorkerInfo {
+    pub ip: String,
+    pub port: u16,
 }
 
 /// Deserialize a vector of base64 strings into a vector of vectors of bytes. Go serializes
