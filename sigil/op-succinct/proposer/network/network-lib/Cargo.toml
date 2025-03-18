@@ -13,6 +13,7 @@ tokio.workspace = true
 alloy-primitives = { workspace = true, features = [
 	"getrandom",
 ] } #alloy-primitives.workspace = true
+reqwest.workspace = true
 
 # local
 op-succinct-host-utils.workspace = true

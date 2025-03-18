@@ -3819,6 +3819,7 @@ dependencies = [
  "op-succinct-build-utils",
  "op-succinct-client-utils",
  "op-succinct-host-utils",
+ "reqwest",
  "serde",
  "serde_json",
  "serde_repr",

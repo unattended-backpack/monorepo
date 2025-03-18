@@ -1,4 +1,5 @@
 pub mod proof_cache;
+pub mod worker_registry;
 
 use alloy_primitives::B256;
 use anyhow::anyhow;
@@ -17,6 +18,7 @@ use sp1_sdk::{
 };
 use std::{collections::HashMap, fmt::Display, future::Future, sync::Arc};
 use tokio::sync::RwLock;
+pub use worker_registry::WorkerRegistry;
 
 #[derive(Serialize, Deserialize, Debug)]
 pub struct ValidateConfigRequest {
@@ -66,6 +68,23 @@ pub struct WorkerAggProofRequest {
     #[serde(deserialize_with = "deserialize_base64_vec")]
     pub subproofs: Vec<Vec<u8>>,
     pub head: String,
+}
+
+pub enum GenericProofRequest {
+    Span(SpanProofRequest),
+    Agg(AggProofRequest),
+}
+
+impl From<AggProofRequest> for GenericProofRequest {
+    fn from(agg_request: AggProofRequest) -> Self {
+        GenericProofRequest::Agg(agg_request)
+    }
+}
+
+impl From<SpanProofRequest> for GenericProofRequest {
+    fn from(span_request: SpanProofRequest) -> Self {
+        GenericProofRequest::Span(span_request)
+    }
 }
 
 #[derive(Deserialize, Serialize, Debug)]
@@ -161,6 +180,8 @@ pub type ProofStore = Arc<RwLock<HashMap<B256, ProofStatus>>>;
 
 pub type ProofCacheWrapper = Arc<RwLock<ProofCache>>;
 
+pub type WorkerRegistryWrapper = Arc<RwLock<WorkerRegistry>>;
+
 /// Configuration of the L2 Output Oracle contract. Created once at server start-up, monitors if there are any changes
 /// to the contract's configuration.
 #[derive(Clone)]
@@ -205,6 +226,12 @@ pub struct WorkerState {
 pub struct WorkerInfo {
     pub ip: String,
     pub port: u16,
+}
+
+impl Display for WorkerInfo {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}:{}", self.ip, self.port)
+    }
 }
 
 /// Deserialize a vector of base64 strings into a vector of vectors of bytes. Go serializes

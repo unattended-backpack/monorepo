@@ -11,7 +11,7 @@ use log::{error, info};
 use network_lib::{
     request_with_retries, AggProofRequest, AppError, ProofCache, ProofResponse, ProofStatus,
     ProofStore, ProofType, SpanProofRequest, SuccinctProposerConfig, ValidateConfigRequest,
-    ValidateConfigResponse,
+    ValidateConfigResponse, WorkerInfo,
 };
 use op_succinct_client_utils::{
     boot::{hash_rollup_config, BootInfoStruct},
@@ -143,6 +143,7 @@ async fn main() -> Result<()> {
         .route("/request_mock_agg_proof", post(request_mock_agg_proof))
         .route("/status/:proof_id", get(get_proof_status))
         .route("/validate_config", post(validate_config))
+        .route("worker_ready", post(worker_ready))
         .layer(DefaultBodyLimit::disable())
         .layer(RequestBodyLimitLayer::new(102400 * 1024 * 1024))
         .with_state(global_hashes);
@@ -757,6 +758,15 @@ async fn get_proof_status(
             proof: vec![],
         }),
     ))
+}
+
+async fn worker_ready(
+    State(state): State<SuccinctProposerConfig>,
+    Json(worker_info): Json<WorkerInfo>,
+) -> Result<(), AppError> {
+    info!("Received worker ready check from {worker_info}");
+
+    Ok(())
 }
 
 // if LOCAL_PROVING_ONLY is set to true, request a local proof
