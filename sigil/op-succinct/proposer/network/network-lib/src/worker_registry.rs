@@ -10,6 +10,7 @@ use tokio::sync::{mpsc, oneshot};
 // are >= this value, the worker is removed from the registry
 const MAX_WORKER_STRIKES: u16 = 3;
 
+#[derive(Clone)]
 pub struct WorkerRegistryClient {
     pub sender: mpsc::Sender<WorkerRegistryCommand>,
 }
@@ -38,6 +39,14 @@ impl WorkerRegistryClient {
 
         Self { sender }
     }
+
+    pub async fn worker_ready(&self, worker_addr: String) -> Result<()> {
+        self.sender.send(WorkerRegistryCommand::WorkerReady { worker_addr}).await.map_err(|e| anyhow::anyhow!("Failed to send command WorkerReady: {}", e))
+    }
+
+    pub async fn assign_proof_request(&self, proof_id: B256, proof_request: GenericProofRequest) -> Result<()>{
+        self.sender.send(WorkerRegistryCommand::AssignProofRequest { proof_id, proof_request }).await.map_err(|e| anyhow::anyhow!("Failed to send command AssignProofRequest: {}", e))
+    }
 }
 
 pub struct WorkerRegistry {
@@ -65,7 +74,6 @@ impl WorkerRegistry {
                 WorkerRegistryCommand::AssignProofRequest {
                     proof_id,
                     ref proof_request,
-                    ref resp_sender,
                 } => {
                     // TODO: should we do this here?
                     self.trim_workers();
@@ -79,11 +87,10 @@ impl WorkerRegistry {
                             false
                         }
                     }) {
+                        info!("Received proof request for proof {} but worker {} is already busy with it", proof_id, worker_addr);
                         // there's already a worker proving this.  We can return
                         // early
-                            
-                        // TODO: handle result
-                        resp_sender.send(worker_addr.clone()).await;
+                        return;
                     }
 
                     // iterate over all idle workers
@@ -132,8 +139,7 @@ impl WorkerRegistry {
                                         proof_id, worker_addr
                                     );
 
-                                    // TODO: handle result
-                                    resp_sender.send(worker_addr.clone()).await;
+                                    worker_state.assigned_proof(proof_id);
                                     return;
                                 } else {
                                     // TODO: could make a StrikeWorker command then make handling
@@ -322,8 +328,6 @@ pub enum WorkerRegistryCommand {
     AssignProofRequest {
         proof_id: B256,
         proof_request: GenericProofRequest,
-        // returns the address of the assigned worker
-        resp_sender: mpsc::Sender<String>,
     },
     ProofStatus {
         target_proof_id: B256,
@@ -361,6 +365,12 @@ impl WorkerState {
     fn add_strike(&mut self) {
         self.strikes += 1;
         debug!("Strike added to worker.  New strikes: {}", self.strikes);
+    }
+
+    fn assigned_proof(&mut self, proof_id: B256) {
+        self.status = WorkerStatus::Busy { proof_id };
+        // This worker has been good.  Reset their strikes
+        self.strikes = 0;
     }
 
     fn should_drop(&self) -> bool {

@@ -7,11 +7,12 @@ use axum::{
     routing::{get, post},
     Json, Router,
 };
-use log::{error, info};
+use log::{debug, error, info};
 use network_lib::{
-    request_with_retries, AggProofRequest, AppError, ProofCache, ProofResponse, ProofStatus,
-    ProofStore, ProofType, SpanProofRequest, SuccinctProposerConfig, ValidateConfigRequest,
-    ValidateConfigResponse, WorkerInfo,
+    request_with_retries, worker_registry, AggProofRequest, AppError, GenericProofRequest,
+    ProofCache, ProofResponse, ProofStatus, ProofStore, ProofType, SpanProofRequest,
+    SuccinctProposerConfig, ValidateConfigRequest, ValidateConfigResponse, WorkerInfo,
+    WorkerRegistryClient,
 };
 use op_succinct_client_utils::{
     boot::{hash_rollup_config, BootInfoStruct},
@@ -29,7 +30,7 @@ use sp1_sdk::{
         FulfillmentStrategy,
     },
     utils, CudaProver, HashableKey, Prover, ProverClient, SP1Proof, SP1ProofMode,
-    SP1ProofWithPublicValues, SP1Stdin, SP1_CIRCUIT_VERSION,
+    SP1ProofWithPublicValues, SP1Stdin, SP1VerifyingKey, SP1_CIRCUIT_VERSION,
 };
 use std::{
     collections::HashMap,
@@ -63,7 +64,6 @@ async fn main() -> Result<()> {
 
     // local cuda prover setup for fallback
     let cuda_prover = Arc::new(ProverClient::builder().cuda().build());
-    let proof_store = Arc::new(RwLock::new(HashMap::new()));
 
     let fetcher = OPSuccinctDataFetcher::new_with_rollup_config(RunContext::Docker).await?;
     // Note: The rollup config hash never changes for a given chain, so we can just hash it once at
@@ -116,6 +116,8 @@ async fn main() -> Result<()> {
         ProofCache::new(proof_cache_size).context("Create proof cache")?,
     ));
 
+    let worker_registry_client = WorkerRegistryClient::new();
+
     // Initialize global hashes.
     let global_hashes = SuccinctProposerConfig {
         agg_vkey_hash,
@@ -130,10 +132,10 @@ async fn main() -> Result<()> {
         agg_proof_mode,
         network_prover,
         prover_network_retries,
-        proof_store,
         cuda_prover,
         local_proving_only,
         proof_cache,
+        worker_registry_client,
     };
 
     let app = Router::new()
@@ -194,6 +196,7 @@ async fn request_span_proof(
 ) -> Result<(StatusCode, Json<ProofResponse>), AppError> {
     info!("Received span proof request: {:?}", payload);
 
+    // First, check if we have the proof locally
     let proof_cache = state.proof_cache.read().await;
     let proof_exists_on_disk = proof_cache.proof_exists(&payload);
     drop(proof_cache);
@@ -204,56 +207,14 @@ async fn request_span_proof(
         // the proposer
         B256::random()
     } else {
-        let fetcher = match OPSuccinctDataFetcher::new_with_rollup_config(RunContext::Docker).await
-        {
-            Ok(f) => f,
-            Err(e) => {
-                error!("Failed to create data fetcher: {}", e);
-                return Err(AppError(e));
-            }
-        };
-
-        let host_args = match fetcher
-            .get_host_args(
-                payload.start,
-                payload.end,
-                None,
-                ProgramType::Multi,
-                CacheMode::DeleteCache,
-            )
-            .await
-        {
-            Ok(cli) => cli,
-            Err(e) => {
-                error!("Failed to get host CLI args: {}", e);
-                return Err(AppError(anyhow::anyhow!(
-                    "Failed to get host CLI args: {}",
-                    e
-                )));
-            }
-        };
-
-        let mem_kv_store = start_server_and_native_client(host_args).await?;
-
-        let sp1_stdin = match get_proof_stdin(mem_kv_store) {
-            Ok(stdin) => stdin,
-            Err(e) => {
-                error!("Failed to get proof stdin: {}", e);
-                return Err(AppError(anyhow::anyhow!(
-                    "Failed to get proof stdin: {}",
-                    e
-                )));
-            }
-        };
-
-        route_proof(ProofType::Span, &state, sp1_stdin).await?
+        route_proof(&payload.into(), &state).await?
     };
 
     info!("Assigned id {proof_id} to span proof request {:?}", payload);
 
     // get write copy of proof_cache
-    let mut proof_cache = state.proof_cache.write().await;
     // record all span proof requests in the lookup
+    let mut proof_cache = state.proof_cache.write().await;
     proof_cache.record_proof_request(&proof_id, &payload);
 
     Ok((
@@ -270,90 +231,8 @@ async fn request_agg_proof(
     Json(payload): Json<AggProofRequest>,
 ) -> Result<(StatusCode, Json<ProofResponse>), AppError> {
     info!("Received agg proof request");
-    let mut proofs_with_pv: Vec<SP1ProofWithPublicValues> = payload
-        .subproofs
-        .iter()
-        .map(|sp| bincode::deserialize(sp).unwrap())
-        .collect();
 
-    let boot_infos: Vec<BootInfoStruct> = proofs_with_pv
-        .iter_mut()
-        .map(|proof| proof.public_values.read())
-        .collect();
-
-    let proofs: Vec<SP1Proof> = proofs_with_pv
-        .iter_mut()
-        .map(|proof| proof.proof.clone())
-        .collect();
-
-    let l1_head_bytes = match payload.head.strip_prefix("0x") {
-        Some(hex_str) => match hex::decode(hex_str) {
-            Ok(bytes) => bytes,
-            Err(e) => {
-                error!("Failed to decode L1 head hex string: {}", e);
-                return Err(AppError(anyhow::anyhow!(
-                    "Failed to decode L1 head hex string: {}",
-                    e
-                )));
-            }
-        },
-        None => {
-            error!("Invalid L1 head format: missing 0x prefix");
-            return Err(AppError(anyhow::anyhow!(
-                "Invalid L1 head format: missing 0x prefix"
-            )));
-        }
-    };
-
-    let l1_head: [u8; 32] = match l1_head_bytes.clone().try_into() {
-        Ok(array) => array,
-        Err(_) => {
-            error!(
-                "Invalid L1 head length: expected 32 bytes, got {}",
-                l1_head_bytes.len()
-            );
-            return Err(AppError(anyhow::anyhow!(
-                "Invalid L1 head length: expected 32 bytes, got {}",
-                l1_head_bytes.len()
-            )));
-        }
-    };
-
-    let fetcher = match OPSuccinctDataFetcher::new_with_rollup_config(RunContext::Docker).await {
-        Ok(f) => f,
-        Err(e) => {
-            error!("Failed to create fetcher: {}", e);
-            return Err(AppError(anyhow::anyhow!("Failed to create fetcher: {}", e)));
-        }
-    };
-
-    let headers = match fetcher
-        .get_header_preimages(&boot_infos, l1_head.into())
-        .await
-    {
-        Ok(h) => h,
-        Err(e) => {
-            error!("Failed to get header preimages: {}", e);
-            return Err(AppError(anyhow::anyhow!(
-                "Failed to get header preimages: {}",
-                e
-            )));
-        }
-    };
-
-    let sp1_stdin =
-        match get_agg_proof_stdin(proofs, boot_infos, headers, &state.range_vk, l1_head.into()) {
-            Ok(s) => s,
-            Err(e) => {
-                error!("Failed to get agg proof stdin: {}", e);
-                return Err(AppError(anyhow::anyhow!(
-                    "Failed to get agg proof stdin: {}",
-                    e
-                )));
-            }
-        };
-
-    let proof_id = route_proof(ProofType::Agg, &state, sp1_stdin).await?;
+    let proof_id = route_proof(&payload.into(), &state).await?;
 
     Ok((
         StatusCode::OK,
@@ -573,32 +452,6 @@ async fn get_proof_status(
     }
     drop(proof_cache);
 
-    // check if this is a proof we're generating locally.  Otherwise check the network for it
-    let proof_store = state.proof_store.read().await;
-    if let Some(status) = proof_store.get(&proof_id) {
-        // if the proof is done, write it to the cache
-        // (execution_status 2 = executed)
-        if status.execution_status == 2 {
-            info!(
-                "Writing local proof with size {} to cache",
-                status.proof.len()
-            );
-            write_proof_to_cache(&state, status.proof.clone(), &proof_id)
-                .await
-                .context("locally generated proof")?;
-        }
-
-        return Ok((
-            StatusCode::OK,
-            Json(ProofStatus {
-                fulfillment_status: status.fulfillment_status,
-                execution_status: status.execution_status,
-                proof: status.proof.clone(),
-            }),
-        ));
-    }
-    drop(proof_store);
-
     if state.local_proving_only {
         // we should never get here.  If we're local proving only and a proof that was requested
         // wasn't found locally we should send a response that prompts the proposer to retry that
@@ -766,6 +619,17 @@ async fn worker_ready(
 ) -> Result<(), AppError> {
     info!("Received worker ready check from {worker_info}");
 
+    let worker_addr = format!("http://{}:{}", worker_info.ip, worker_info.port);
+    debug!(
+        "Sending command to register worker with address {}",
+        worker_addr
+    );
+
+    state
+        .worker_registry_client
+        .worker_ready(worker_addr)
+        .await?;
+
     Ok(())
 }
 
@@ -773,22 +637,22 @@ async fn worker_ready(
 // otherwise, make a request to the prover network.  If this request
 // fails PROVER_NETWORK_RETRIES times, then fall back to local proving
 async fn route_proof(
-    proof_type: ProofType,
+    proof_request: &GenericProofRequest,
     state: &SuccinctProposerConfig,
-    sp1_stdin: SP1Stdin,
 ) -> Result<B256, AppError> {
     if state.local_proving_only {
-        locally_prove(
-            proof_type,
-            state.proof_store.clone(),
-            state.cuda_prover.clone(),
-            sp1_stdin,
-        )
-        .await
+        info!("Attempting to route proof to the local prover network");
+        let proof_id = B256::random();
+        state
+            .worker_registry_client
+            .assign_proof_request(proof_id, proof_request.clone())
+            .await;
+        Ok(proof_id)
     } else {
-        info!("Making network request for {} proof", proof_type);
-        let prover_network_response = match proof_type {
-            ProofType::Span => {
+        let prover_network_response = match proof_request {
+            GenericProofRequest::Span(payload) => {
+                info!("Making network request for span proof");
+                let sp1_stdin = generate_span_sp1_stdin(payload).await?;
                 let network_request = || {
                     state
                         .network_prover
@@ -801,7 +665,9 @@ async fn route_proof(
                 };
                 request_with_retries(state.prover_network_retries, network_request).await
             }
-            ProofType::Agg => {
+            GenericProofRequest::Agg(payload) => {
+                info!("Making network request for agg proof");
+                let sp1_stdin = generate_agg_sp1_stdin(payload, &state.range_vk).await?;
                 let network_request = || {
                     state
                         .network_prover
@@ -814,35 +680,28 @@ async fn route_proof(
             }
         };
 
-        // request the future a number of times
         match prover_network_response {
             // success
             Ok(proof_id) => Ok(proof_id),
-            // failed after PROVER_NETWORK_RETRIES retries, make the proof locally
+            // failed after PROVER_NETWORK_RETRIES retries, route the proof to the local prover
+            // network
             Err(_) => {
-                error!(
-                    "Prover network request for {} proof failed. Requesting proof locally.",
-                    proof_type
-                );
+                error!("Prover network request for proof failed. Attempting to route proof to the internal prover network");
 
-                locally_prove(
-                    proof_type,
-                    state.proof_store.clone(),
-                    state.cuda_prover.clone(),
-                    sp1_stdin,
-                )
-                .await
+                let proof_id = B256::random();
+                state
+                    .worker_registry_client
+                    .assign_proof_request(proof_id, proof_request.clone())
+                    .await;
+                Ok(proof_id)
             }
         }
     }
 }
 
-// spawns a process that creates a proof locally
-// runs proof in a background thread.  Only needs to be async because of
-// proof_store.write().await.  It isn't blocked by anything else.
-async fn locally_prove(
+/*
+fn locally_prove(
     proof_type: ProofType,
-    proof_store: ProofStore,
     cuda_prover: Arc<CudaProver>,
     sp1_stdin: SP1Stdin,
 ) -> Result<B256, AppError> {
@@ -853,8 +712,6 @@ async fn locally_prove(
         execution_status: ExecutionStatus::Unexecuted.into(),
         proof: Vec::new(),
     };
-
-    proof_store.write().await.insert(proof_id, initial_status);
 
     tokio::spawn(async move {
         let start_time = tokio::time::Instant::now();
@@ -929,14 +786,12 @@ async fn locally_prove(
         let minutes = start_time.elapsed().as_secs_f64() / 60.0;
         info!("Time to compute {proof_type} proof: {} minutes", minutes);
 
-        // update proof store
-        proof_store.write().await.insert(proof_id, proof_status);
-
         Ok(())
     });
 
     Ok(proof_id)
 }
+*/
 
 async fn write_proof_to_cache(
     state: &SuccinctProposerConfig,
@@ -955,4 +810,119 @@ async fn write_proof_to_cache(
     }
 
     Ok(())
+}
+
+async fn generate_span_sp1_stdin(payload: &SpanProofRequest) -> Result<SP1Stdin> {
+    let fetcher = match OPSuccinctDataFetcher::new_with_rollup_config(RunContext::Docker).await {
+        Ok(f) => f,
+        Err(e) => {
+            error!("Failed to create data fetcher: {}", e);
+            return Err(e);
+        }
+    };
+    let host_args = match fetcher
+        .get_host_args(
+            payload.start,
+            payload.end,
+            None,
+            ProgramType::Multi,
+            CacheMode::DeleteCache,
+        )
+        .await
+    {
+        Ok(cli) => cli,
+        Err(e) => {
+            error!("Failed to get host CLI args: {}", e);
+            return Err(anyhow::anyhow!("Failed to get host CLI args: {}", e));
+        }
+    };
+
+    let mem_kv_store = start_server_and_native_client(host_args).await?;
+
+    match get_proof_stdin(mem_kv_store) {
+        Ok(stdin) => Ok(stdin),
+        Err(e) => {
+            error!("Failed to get proof stdin: {}", e);
+            Err(anyhow::anyhow!("Failed to get proof stdin: {}", e))
+        }
+    }
+}
+
+async fn generate_agg_sp1_stdin(
+    payload: &AggProofRequest,
+    vkey: &SP1VerifyingKey,
+) -> Result<SP1Stdin> {
+    let mut proofs_with_pv: Vec<SP1ProofWithPublicValues> = payload
+        .subproofs
+        .iter()
+        .map(|sp| bincode::deserialize(sp).unwrap())
+        .collect();
+
+    let boot_infos: Vec<BootInfoStruct> = proofs_with_pv
+        .iter_mut()
+        .map(|proof| proof.public_values.read())
+        .collect();
+
+    let proofs: Vec<SP1Proof> = proofs_with_pv
+        .iter_mut()
+        .map(|proof| proof.proof.clone())
+        .collect();
+
+    let l1_head_bytes = match payload.head.strip_prefix("0x") {
+        Some(hex_str) => match hex::decode(hex_str) {
+            Ok(bytes) => bytes,
+            Err(e) => {
+                error!("Failed to decode L1 head hex string: {}", e);
+                return Err(anyhow::anyhow!(
+                    "Failed to decode L1 head hex string: {}",
+                    e
+                ));
+            }
+        },
+        None => {
+            error!("Invalid L1 head format: missing 0x prefix");
+            return Err(anyhow::anyhow!("Invalid L1 head format: missing 0x prefix"));
+        }
+    };
+
+    let l1_head: [u8; 32] = match l1_head_bytes.clone().try_into() {
+        Ok(array) => array,
+        Err(_) => {
+            error!(
+                "Invalid L1 head length: expected 32 bytes, got {}",
+                l1_head_bytes.len()
+            );
+            return Err(anyhow::anyhow!(
+                "Invalid L1 head length: expected 32 bytes, got {}",
+                l1_head_bytes.len()
+            ));
+        }
+    };
+
+    let fetcher = match OPSuccinctDataFetcher::new_with_rollup_config(RunContext::Docker).await {
+        Ok(f) => f,
+        Err(e) => {
+            error!("Failed to create fetcher: {}", e);
+            return Err(anyhow::anyhow!("Failed to create fetcher: {}", e));
+        }
+    };
+
+    let headers = match fetcher
+        .get_header_preimages(&boot_infos, l1_head.into())
+        .await
+    {
+        Ok(h) => h,
+        Err(e) => {
+            error!("Failed to get header preimages: {}", e);
+            return Err(anyhow::anyhow!("Failed to get header preimages: {}", e));
+        }
+    };
+
+    match get_agg_proof_stdin(proofs, boot_infos, headers, vkey, l1_head.into()) {
+        Ok(s) => Ok(s),
+        Err(e) => {
+            error!("Failed to get agg proof stdin: {}", e);
+            Err(anyhow::anyhow!("Failed to get agg proof stdin: {}", e))
+        }
+    }
 }

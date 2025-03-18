@@ -18,7 +18,7 @@ use sp1_sdk::{
 };
 use std::{collections::HashMap, fmt::Display, future::Future, sync::Arc};
 use tokio::sync::RwLock;
-pub use worker_registry::WorkerRegistry;
+pub use worker_registry::WorkerRegistryClient;
 
 #[derive(Serialize, Deserialize, Debug)]
 pub struct ValidateConfigRequest {
@@ -55,7 +55,8 @@ impl Display for SpanProofRequest {
     }
 }
 
-#[derive(Deserialize, Serialize, Debug)]
+// TODO: remove Clone from this.  It's big
+#[derive(Clone, Deserialize, Serialize, Debug)]
 pub struct AggProofRequest {
     #[serde(deserialize_with = "deserialize_base64_vec")]
     pub subproofs: Vec<Vec<u8>>,
@@ -70,6 +71,7 @@ pub struct WorkerAggProofRequest {
     pub head: String,
 }
 
+#[derive(Clone)]
 pub enum GenericProofRequest {
     Span(SpanProofRequest),
     Agg(AggProofRequest),
@@ -180,8 +182,6 @@ pub type ProofStore = Arc<RwLock<HashMap<B256, ProofStatus>>>;
 
 pub type ProofCacheWrapper = Arc<RwLock<ProofCache>>;
 
-pub type WorkerRegistryWrapper = Arc<RwLock<WorkerRegistry>>;
-
 /// Configuration of the L2 Output Oracle contract. Created once at server start-up, monitors if there are any changes
 /// to the contract's configuration.
 #[derive(Clone)]
@@ -200,10 +200,10 @@ pub struct SuccinctProposerConfig {
     // how many retries on prover network requests until we fall back to local proof.
     pub prover_network_retries: usize,
     // for local proving mode
-    pub proof_store: ProofStore,
     pub cuda_prover: Arc<CudaProver>,
     pub local_proving_only: bool,
     pub proof_cache: ProofCacheWrapper,
+    pub worker_registry_client: WorkerRegistryClient,
 }
 
 #[derive(Clone)]
