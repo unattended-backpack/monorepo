@@ -4,8 +4,6 @@ use anyhow::{Context, Result};
 use log::info;
 use std::{collections::HashMap, fs, path::Path};
 
-const PROOF_CACHE_DIR: &str = "proofs";
-
 // If the proving server goes offline and it has completed some span proofs, when it comes back up
 // it will have to re-run those exact same spans.  Spans can take hours so we want some degree of
 // persistence for when the server binary is stopped & started.  At the very least for easier
@@ -16,6 +14,8 @@ const PROOF_CACHE_DIR: &str = "proofs";
 pub struct ProofCache {
     // max cache size.  Setting it to 0 disables the cache
     cache_size: usize,
+    // directory where proofs are saved
+    proof_cache_directory: String,
     // goes up to cache_size and loops.  Keeps track of the next proof to replace
     // increments each time we write a proof to disk
     current_cache_index: usize,
@@ -27,9 +27,9 @@ pub struct ProofCache {
 }
 
 impl ProofCache {
-    pub fn new(cache_size: usize) -> Result<Self> {
+    pub fn new(cache_size: usize, proof_cache_directory: &str) -> Result<Self> {
         // Create `proofs/` directory if it doesn't already exist
-        let path = Path::new(PROOF_CACHE_DIR);
+        let path = Path::new(proof_cache_directory);
         if !path.exists() {
             info!("`proofs/` directory doesn't exist.  Creating it.");
             fs::create_dir(path).context("Create proofs/ directory")?;
@@ -37,7 +37,6 @@ impl ProofCache {
             info!("Found `proofs/` directory.");
         }
 
-        let current_cache_index = 0;
         let mut cache_list = Vec::with_capacity(cache_size);
         // fill with default values so we never have to check if current_cache_index is out of
         // bounds
@@ -47,7 +46,8 @@ impl ProofCache {
 
         Ok(Self {
             cache_size,
-            current_cache_index,
+            proof_cache_directory: format!("{proof_cache_directory}"),
+            current_cache_index: 0,
             cache_list,
             proof_request_lookup,
         })
@@ -75,7 +75,8 @@ impl ProofCache {
             return false;
         }
 
-        let proof_path_name = proof_request_to_file_path(proof_request);
+        let proof_path_name =
+            proof_request_to_file_path(&self.proof_cache_directory, proof_request);
         let proof_path = Path::new(&proof_path_name);
 
         proof_path.exists()
@@ -92,7 +93,8 @@ impl ProofCache {
 
         match self.proof_request_lookup.get(proof_id) {
             Some(proof_request) => {
-                let proof_path_name = proof_request_to_file_path(proof_request);
+                let proof_path_name =
+                    proof_request_to_file_path(&self.proof_cache_directory, proof_request);
                 let proof_path = Path::new(&proof_path_name);
                 if proof_path.exists() {
                     info!(
@@ -151,7 +153,8 @@ impl ProofCache {
             proof_id
         ))?;
         // get proof file name so we can write
-        let proof_path_name = proof_request_to_file_path(proof_request);
+        let proof_path_name =
+            proof_request_to_file_path(&self.proof_cache_directory, proof_request);
         let path = Path::new(&proof_path_name);
 
         // write completed proof to file
@@ -177,10 +180,13 @@ impl ProofCache {
     }
 }
 
-fn proof_request_to_file_path(proof_request: &SpanProofRequest) -> String {
+fn proof_request_to_file_path(
+    proof_cache_directory: &str,
+    proof_request: &SpanProofRequest,
+) -> String {
     format!(
         "{}/{}-{}",
-        PROOF_CACHE_DIR, proof_request.start, proof_request.end
+        proof_cache_directory, proof_request.start, proof_request.end
     )
 }
 
@@ -190,10 +196,10 @@ mod tests {
 
     #[test]
     fn test_constructor() {
-        let proof_cache = ProofCache::new(0).unwrap();
+        let proof_cache = ProofCache::new(0, "".into()).unwrap();
         assert_eq!(proof_cache.cache_list.len(), 0);
 
-        let proof_cache = ProofCache::new(10).unwrap();
+        let proof_cache = ProofCache::new(10, "".into()).unwrap();
         assert_eq!(proof_cache.cache_list.len(), 10);
     }
 
@@ -204,29 +210,30 @@ mod tests {
             end: 256,
         };
 
-        let proof_file_path_name = proof_request_to_file_path(&proof_request);
-        let correct_proof_file_path_name = format!("{PROOF_CACHE_DIR}/255-256");
+        let proof_cache_dir = "proofs";
+        let proof_file_path_name = proof_request_to_file_path(proof_cache_dir, &proof_request);
+        let correct_proof_file_path_name = format!("{proof_cache_dir}/255-256");
 
         assert_eq!(proof_file_path_name, correct_proof_file_path_name);
     }
 
     #[test]
     fn test_increment_current_cache_index_0() {
-        let mut proof_cache = ProofCache::new(0).unwrap();
+        let mut proof_cache = ProofCache::new(0, "").unwrap();
         proof_cache.increment_current_cache_index();
         assert_eq!(proof_cache.current_cache_index, 0);
     }
 
     #[test]
     fn test_increment_current_cache_index_1() {
-        let mut proof_cache = ProofCache::new(1).unwrap();
+        let mut proof_cache = ProofCache::new(1, "").unwrap();
         proof_cache.increment_current_cache_index();
         assert_eq!(proof_cache.current_cache_index, 0);
     }
 
     #[test]
     fn test_increment_current_cache_index_2() {
-        let mut proof_cache = ProofCache::new(2).unwrap();
+        let mut proof_cache = ProofCache::new(2, "").unwrap();
         proof_cache.increment_current_cache_index();
         assert_eq!(proof_cache.current_cache_index, 1);
         proof_cache.increment_current_cache_index();
@@ -237,7 +244,7 @@ mod tests {
 
     #[test]
     fn test_increment_current_cache_index_3() {
-        let mut proof_cache = ProofCache::new(3).unwrap();
+        let mut proof_cache = ProofCache::new(3, "").unwrap();
         proof_cache.increment_current_cache_index();
         assert_eq!(proof_cache.current_cache_index, 1);
         proof_cache.increment_current_cache_index();

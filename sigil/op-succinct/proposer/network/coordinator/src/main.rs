@@ -88,11 +88,20 @@ async fn main() -> Result<()> {
         _ => false,
     };
 
-    // defaults to 3 retries
+    // retries for requests to internal and external prover networks
     let prover_network_retries: usize = match env::var("PROVER_NETWORK_RETRIES") {
         Ok(retries) => retries
             .parse()
             .context("parse PROVER_NETWORK_RETRIES as usize")?,
+        _ => 3,
+    };
+
+    // Worker strikes start at 0 and increment by 1 on every failed request.  When a worker's strikes
+    // are >= this value, the worker is removed from the registry
+    let max_worker_strikes: usize = match env::var("MAX_WORKER_STRIKES") {
+        Ok(strikes) => strikes
+            .parse()
+            .context("parse MAX_WORKER_STRIKES as usize")?,
         _ => 3,
     };
 
@@ -107,11 +116,17 @@ async fn main() -> Result<()> {
         _ => 10,
     };
 
+    let proof_cache_directory: String = match env::var("PROOF_CACHE_DIRECTORY") {
+        Ok(dir) => dir,
+        _ => format!("proofs"),
+    };
+
     let proof_cache = Arc::new(RwLock::new(
-        ProofCache::new(proof_cache_size).context("Create proof cache")?,
+        ProofCache::new(proof_cache_size, &proof_cache_directory).context("Create proof cache")?,
     ));
 
-    let worker_registry_client = WorkerRegistryClient::new();
+    let worker_registry_client =
+        WorkerRegistryClient::new(max_worker_strikes, prover_network_retries);
 
     // Initialize global hashes.
     let global_hashes = SuccinctProposerConfig {

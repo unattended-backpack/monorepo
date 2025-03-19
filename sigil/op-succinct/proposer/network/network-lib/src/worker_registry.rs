@@ -9,12 +9,6 @@ use reqwest::Client;
 use std::{collections::HashMap, fmt::Display};
 use tokio::sync::{mpsc, oneshot};
 
-// Worker strikes start at 0 and increment by 1 on every failed request.  When a worker's strikes
-// are >= this value, the worker is removed from the registry
-const MAX_WORKER_STRIKES: u16 = 3;
-
-const PROVER_NETWORK_RETRIES: usize = 3;
-
 #[derive(Clone)]
 pub struct WorkerRegistryClient {
     pub sender: mpsc::Sender<WorkerRegistryCommand>,
@@ -22,18 +16,20 @@ pub struct WorkerRegistryClient {
 
 impl Default for WorkerRegistryClient {
     fn default() -> Self {
-        Self::new()
+        Self::new(3, 3)
     }
 }
 
 impl WorkerRegistryClient {
-    pub fn new() -> Self {
+    pub fn new(cfg_max_worker_strikes: usize, cfg_prover_network_retries: usize) -> Self {
         let workers = HashMap::new();
         let reqwest_client = Client::new();
 
         let (sender, receiver) = mpsc::channel(100);
 
         let worker_registry = WorkerRegistry {
+            cfg_max_worker_strikes,
+            cfg_prover_network_retries,
             workers,
             reqwest_client,
             receiver,
@@ -122,6 +118,8 @@ impl WorkerRegistryClient {
 }
 
 pub struct WorkerRegistry {
+    pub cfg_max_worker_strikes: usize,
+    pub cfg_prover_network_retries: usize,
     // Using a HashMap is a fine complexity tradeoff because we'll never have >20 workers, so
     // iterating isn't horrible in reality.
     pub workers: HashMap<String, WorkerState>,
@@ -257,7 +255,9 @@ impl WorkerRegistry {
                     {
                         Some(old_state) => {
                             // if this worker was working on a proof but we didn't drop it
-                            if old_state.is_busy() && !old_state.should_drop() {
+                            if old_state.is_busy()
+                                && !old_state.should_drop(self.cfg_max_worker_strikes)
+                            {
                                 error!("Worker {} re-started but wasn't dropped yet.  Worker State: {}", worker_addr, old_state);
                             } else {
                                 info!(
@@ -315,7 +315,7 @@ impl WorkerRegistry {
                     };
 
                     let response = match request_with_retries(
-                        PROVER_NETWORK_RETRIES,
+                        self.cfg_prover_network_retries,
                         worker_proof_status_request,
                     )
                     .await
@@ -324,7 +324,7 @@ impl WorkerRegistry {
                         Err(err) => {
                             // TODO: could make a StrikeWorker command then make handling
                             // reqwest responses more async by moving them to a tokio task
-                            worker_state.add_strikes(PROVER_NETWORK_RETRIES.try_into().unwrap());
+                            worker_state.add_strikes(self.cfg_prover_network_retries);
                             error!(
                                 "Failed to send request {}/status/{}. Error: {}",
                                 worker_addr, target_proof_id, err
@@ -386,7 +386,7 @@ impl WorkerRegistry {
             .workers
             .iter_mut()
             .filter_map(|(worker_addr, worker_state)| {
-                if worker_state.should_drop() {
+                if worker_state.should_drop(self.cfg_max_worker_strikes) {
                     Some(worker_addr.clone())
                 } else {
                     None
@@ -435,7 +435,7 @@ pub enum WorkerRegistryCommand {
 #[derive(Eq, PartialEq, Clone)]
 pub struct WorkerState {
     status: WorkerStatus,
-    strikes: u16,
+    strikes: usize,
 }
 
 impl Default for WorkerState {
@@ -457,7 +457,7 @@ impl WorkerState {
         debug!("Strike added to worker.  New strikes: {}", self.strikes);
     }
 
-    fn add_strikes(&mut self, strikes: u16) {
+    fn add_strikes(&mut self, strikes: usize) {
         self.strikes += strikes;
         debug!(
             "{} strikes added to worker.  New strikes: {}",
@@ -471,8 +471,8 @@ impl WorkerState {
         self.strikes = 0;
     }
 
-    fn should_drop(&self) -> bool {
-        self.strikes >= MAX_WORKER_STRIKES
+    fn should_drop(&self, cfg_max_worker_strikes: usize) -> bool {
+        self.strikes >= cfg_max_worker_strikes
     }
 
     // returns the proof it's currently working on, if any
