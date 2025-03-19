@@ -49,9 +49,6 @@ async fn main() -> Result<()> {
 
     let proof_store = Arc::new(RwLock::new(HashMap::new()));
 
-    // local cuda prover setup for fallback
-    let cuda_prover = Arc::new(ProverClient::builder().cuda().build());
-
     let coordinator_address =
         env::var("COORDINATOR_ADDRESS").context("Set COORDINATOR_ADDRESS in .env")?;
 

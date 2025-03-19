@@ -154,7 +154,7 @@ async fn main() -> Result<()> {
         .route("/request_mock_agg_proof", post(request_mock_agg_proof))
         .route("/status/:proof_id", get(get_proof_status))
         .route("/validate_config", post(validate_config))
-        .route("worker_ready", post(worker_ready))
+        .route("/worker_ready", post(worker_ready))
         .layer(DefaultBodyLimit::disable())
         .layer(RequestBodyLimitLayer::new(102400 * 1024 * 1024))
         .with_state(global_hashes);
