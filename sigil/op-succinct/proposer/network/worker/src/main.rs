@@ -52,6 +52,9 @@ async fn main() -> Result<()> {
     let coordinator_address =
         env::var("COORDINATOR_ADDRESS").context("Set COORDINATOR_ADDRESS in .env")?;
 
+    let this_worker_ip =
+        env::var("THIS_WORKER_ADDRESS").context("Set THIS_WORKER_ADDRESS in .env")?;
+
     let worker_state = WorkerState {
         range_vk: Arc::new(range_vk),
         proof_store,
@@ -80,7 +83,7 @@ async fn main() -> Result<()> {
         // TODO: is it a vulnerability to send this info over the network
         let client = Client::new();
         let worker_info = WorkerInfo {
-            ip: local_addr.ip().to_string(),
+            ip: this_worker_ip,
             port: local_addr.port(),
         };
 
