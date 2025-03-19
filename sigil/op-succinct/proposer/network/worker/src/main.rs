@@ -29,7 +29,7 @@ use tokio::{
 };
 use tower_http::limit::RequestBodyLimitLayer;
 
-const WORKER_REGISTER_ENDPOINT: &str = "worker-ready";
+const WORKER_REGISTER_ENDPOINT: &str = "worker_ready";
 
 const RANGE_ELF: &[u8] = include_bytes!("../../../../elf/range-elf");
 const AGG_ELF: &[u8] = include_bytes!("../../../../elf/aggregation-elf");
@@ -102,7 +102,8 @@ async fn main() -> Result<()> {
                     );
                 } else {
                     error!(
-                        "Failed to register with coordinator: HTTP {}",
+                        "Failed to register with coordinator {}: HTTP {}",
+                        coordinator_address,
                         response.status()
                     );
                 }
