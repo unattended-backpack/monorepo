@@ -9,10 +9,9 @@ use axum::{
 };
 use log::{debug, error, info};
 use network_lib::{
-    request_with_retries, worker_registry, AggProofRequest, AppError, GenericProofRequest,
-    ProofCache, ProofResponse, ProofStatus, ProofStore, ProofType, SpanProofRequest,
-    SuccinctProposerConfig, ValidateConfigRequest, ValidateConfigResponse, WorkerInfo,
-    WorkerRegistryClient,
+    request_with_retries, AggProofRequest, AppError, GenericProofRequest, ProofCache,
+    ProofResponse, ProofStatus, SpanProofRequest, SuccinctProposerConfig, ValidateConfigRequest,
+    ValidateConfigResponse, WorkerInfo, WorkerRegistryClient,
 };
 use op_succinct_client_utils::{
     boot::{hash_rollup_config, BootInfoStruct},
@@ -29,15 +28,14 @@ use sp1_sdk::{
         proto::network::{ExecutionStatus, FulfillmentStatus},
         FulfillmentStrategy,
     },
-    utils, CudaProver, HashableKey, Prover, ProverClient, SP1Proof, SP1ProofMode,
-    SP1ProofWithPublicValues, SP1Stdin, SP1VerifyingKey, SP1_CIRCUIT_VERSION,
+    utils, HashableKey, Prover, ProverClient, SP1Proof, SP1ProofMode, SP1ProofWithPublicValues,
+    SP1Stdin, SP1VerifyingKey, SP1_CIRCUIT_VERSION,
 };
 use std::{
-    collections::HashMap,
     env, fs,
     str::FromStr,
     sync::Arc,
-    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
+    time::{Instant, SystemTime, UNIX_EPOCH},
 };
 use tokio::sync::RwLock;
 use tower_http::limit::RequestBodyLimitLayer;
@@ -459,11 +457,17 @@ async fn get_proof_status(
     // we got a proof status from the worker_registry
     if let Some(proof_status) = proof_status {
         if proof_status.fulfillment_status == FulfillmentStatus::Fulfilled as i32 {
-            info!("Found proof {proof_id} on worker network");
+            info!("Found completed proof {proof_id} on worker network");
             write_proof_to_cache(&state, proof_status.proof.clone(), &proof_id)
                 .await
                 .context("worker proof")?;
+            // tell worker_registry to mark this worker as ready for another proof
+            state
+                .worker_registry_client
+                .proof_complete(proof_id)
+                .await?;
         }
+        // signal to worker_registry that this worker can be assigned new tasks
         Ok((StatusCode::OK, Json(proof_status)))
     }
     // if we're useing the prover network

@@ -3,8 +3,8 @@ use crate::{
     WorkerSpanProofRequest,
 };
 use alloy_primitives::B256;
-use anyhow::{Context, Result};
-use log::{debug, error, info};
+use anyhow::Result;
+use log::{debug, error, info, warn};
 use reqwest::Client;
 use std::{collections::HashMap, fmt::Display};
 use tokio::sync::{mpsc, oneshot};
@@ -111,6 +111,14 @@ impl WorkerRegistryClient {
             }
         }
     }
+
+    // signal that the proposer got the proof and the worker is ready to receive a new proof
+    pub async fn proof_complete(&self, proof_id: B256) -> Result<()> {
+        self.sender
+            .send(WorkerRegistryCommand::ProofComplete { proof_id })
+            .await
+            .map_err(|e| anyhow::anyhow!("Failed to send command ProofComplete: {}", e))
+    }
 }
 
 pub struct WorkerRegistry {
@@ -126,8 +134,6 @@ pub struct WorkerRegistry {
 
 // TODO: extract into `handle_xyz()` functions
 impl WorkerRegistry {
-    // TODO: to get around deadlock when waiting for a worker to become available, could I simply
-    // send an event to the channel from inside the channel?
     async fn background_event_loop(mut self) {
         while let Some(command) = self.receiver.recv().await {
             debug!(
@@ -139,7 +145,7 @@ impl WorkerRegistry {
                     proof_id,
                     ref proof_request,
                 } => {
-                    // TODO: should we do this here?
+                    // remove any dead workers
                     self.trim_workers();
                     info!("{} workers found", self.workers.len());
 
@@ -252,9 +258,7 @@ impl WorkerRegistry {
                         Some(old_state) => {
                             // if this worker was working on a proof but we didn't drop it
                             if old_state.is_busy() && !old_state.should_drop() {
-                                // TODO: what should happen to the proof it was working on?
                                 error!("Worker {} re-started but wasn't dropped yet.  Worker State: {}", worker_addr, old_state);
-                                todo!()
                             } else {
                                 info!(
                                     "Known worker {} re-started, resetting state from {} to {}",
@@ -267,14 +271,18 @@ impl WorkerRegistry {
                         }
                     }
                 }
-                WorkerRegistryCommand::ProofComplete { worker_addr } => {
-                    debug!("Worker {} completed a proof and is now Idle.", worker_addr);
-                    // move worker from "busy" to "idle"
-                    if let Some(worker_state) = self.workers.get_mut(&worker_addr) {
+                WorkerRegistryCommand::ProofComplete { proof_id } => {
+                    if let Some((worker_addr, worker_state)) = self
+                        .workers
+                        .iter_mut()
+                        .find(|(_, worker_state)| worker_state.current_proof_id() == Some(proof_id))
+                    {
+                        // move worker from "busy" to "idle"
+                        debug!("Worker {} completed a proof and is now Idle.", worker_addr);
                         worker_state.status = WorkerStatus::Idle;
+                    } else {
+                        error!("Worker registry couldn't find worker who was assigned proof {proof_id}");
                     }
-                    // TODO: should we do this logic inside ProofStatus when a completed proof is
-                    // returned?
                 }
                 WorkerRegistryCommand::ProofStatus {
                     target_proof_id,
@@ -372,7 +380,6 @@ impl WorkerRegistry {
         }
     }
 
-    // TODO: where should we call this?
     // iterate through workers and remove any who have > MAX_STRIKES strikes
     fn trim_workers(&mut self) {
         let dead_workers: Vec<String> = self
@@ -392,16 +399,12 @@ impl WorkerRegistry {
             if let Some(dead_worker_state) = self.workers.remove(&dead_worker_addr) {
                 info!("Removing worker {dead_worker_addr} from worker registry");
                 if let Some(dangling_proof) = dead_worker_state.current_proof_id() {
-                    // TODO: re-request the proof somehow.  Depends on if we want this to bubble up
-                    // to coordinator or not.  Probably should to check if we already have the
-                    // proof locally
+                    // The dangling proof will eventually be requested for by the proposer via
+                    // `proof_status` and the registry will return None, which will cause the
+                    // coordinator to return `ProofStatus::lost()`, which will cause the proposer
+                    // to re-request the proof
 
-                    // TODO: If we're calling this inside `assign_proof` handler, then we need to
-                    // make sure it assigns this re-started proof before it assigns the `new`
-                    // proof.
-
-                    // Might need to send the proof_id to proof_store thread
-                    todo!()
+                    warn!("Proof {dangling_proof} left incomplete as a result of killing worker {dead_worker_addr}");
                 }
             }
         }
@@ -425,7 +428,7 @@ pub enum WorkerRegistryCommand {
         resp_sender: oneshot::Sender<Option<std::result::Result<ProofStatus, String>>>,
     },
     ProofComplete {
-        worker_addr: String,
+        proof_id: B256,
     },
 }
 
