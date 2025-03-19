@@ -52,8 +52,7 @@ async fn main() -> Result<()> {
     let coordinator_address =
         env::var("COORDINATOR_ADDRESS").context("Set COORDINATOR_ADDRESS in .env")?;
 
-    let this_worker_ip =
-        env::var("THIS_WORKER_ADDRESS").context("Set THIS_WORKER_ADDRESS in .env")?;
+    let this_worker_ip = env::var("THIS_WORKER_IP").context("Set THIS_WORKER_IP in .env")?;
 
     let worker_state = WorkerState {
         range_vk: Arc::new(range_vk),
