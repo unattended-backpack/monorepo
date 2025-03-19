@@ -43,6 +43,7 @@ impl WorkerRegistryClient {
 
     pub async fn worker_ready(&self, worker_addr: String) -> Result<()> {
         self.sender
+            .clone()
             .send(WorkerRegistryCommand::WorkerReady { worker_addr })
             .await
             .map_err(|e| anyhow::anyhow!("Failed to send command WorkerReady: {}", e))
@@ -54,6 +55,7 @@ impl WorkerRegistryClient {
         proof_request: GenericProofRequest,
     ) -> Result<()> {
         self.sender
+            .clone()
             .send(WorkerRegistryCommand::AssignProofRequest {
                 proof_id,
                 proof_request,
@@ -69,6 +71,7 @@ impl WorkerRegistryClient {
         loop {
             let (resp_sender, receiver) = oneshot::channel();
             self.sender
+                .clone()
                 .send(WorkerRegistryCommand::ProofStatus {
                     target_proof_id: proof_id,
                     resp_sender,
