@@ -13,8 +13,11 @@ pub use proof_cache::ProofCache;
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_repr::{Deserialize_repr, Serialize_repr};
 use sp1_sdk::{
-    network::FulfillmentStrategy, CudaProver, NetworkProver, SP1ProofMode, SP1ProvingKey,
-    SP1VerifyingKey,
+    network::{
+        proto::network::{ExecutionStatus, FulfillmentStatus},
+        FulfillmentStrategy,
+    },
+    CudaProver, NetworkProver, SP1ProofMode, SP1ProvingKey, SP1VerifyingKey,
 };
 use std::{collections::HashMap, fmt::Display, future::Future, sync::Arc};
 use tokio::sync::RwLock;
@@ -146,6 +149,16 @@ pub struct ProofStatus {
     pub proof: Vec<u8>,
 }
 
+impl ProofStatus {
+    pub fn lost() -> Self {
+        Self {
+            fulfillment_status: FulfillmentStatus::UnspecifiedFulfillmentStatus.into(),
+            execution_status: ExecutionStatus::UnspecifiedExecutionStatus.into(),
+            proof: vec![],
+        }
+    }
+}
+
 impl Display for ProofStatus {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let fulfillment_status = match self.fulfillment_status {
@@ -178,8 +191,6 @@ impl Display for ProofStatus {
     }
 }
 
-pub type ProofStore = Arc<RwLock<HashMap<B256, ProofStatus>>>;
-
 pub type ProofCacheWrapper = Arc<RwLock<ProofCache>>;
 
 /// Configuration of the L2 Output Oracle contract. Created once at server start-up, monitors if there are any changes
@@ -199,12 +210,12 @@ pub struct SuccinctProposerConfig {
     pub network_prover: Arc<NetworkProver>,
     // how many retries on prover network requests until we fall back to local proof.
     pub prover_network_retries: usize,
-    // for local proving mode
-    pub cuda_prover: Arc<CudaProver>,
     pub local_proving_only: bool,
     pub proof_cache: ProofCacheWrapper,
     pub worker_registry_client: WorkerRegistryClient,
 }
+
+pub type ProofStore = Arc<RwLock<HashMap<B256, ProofStatus>>>;
 
 #[derive(Clone)]
 pub struct WorkerState {
@@ -268,7 +279,7 @@ where
             Ok(res) => return Ok(res),
             Err(err) => {
                 let error_msg = format!(
-                    "Prover network request retry {}/{} failed: {}",
+                    "Request retry {}/{} failed: {}",
                     retry_num, max_retries, err
                 );
                 error!("{}", error_msg);
@@ -280,7 +291,7 @@ where
     }
 
     Err(anyhow!(
-        "All {} requests to the prover network failed. Last error: {}",
+        "All {} requests failed. Last error: {}",
         max_retries,
         last_error.unwrap_or_else(|| anyhow!("Unknown error"))
     ))

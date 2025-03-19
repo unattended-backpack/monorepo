@@ -37,7 +37,7 @@ use std::{
     env, fs,
     str::FromStr,
     sync::Arc,
-    time::{Instant, SystemTime, UNIX_EPOCH},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 use tokio::sync::RwLock;
 use tower_http::limit::RequestBodyLimitLayer;
@@ -61,9 +61,6 @@ async fn main() -> Result<()> {
     let multi_block_vkey_u8 = u32_to_u8(range_vk.vk.hash_u32());
     let range_vkey_commitment = B256::from(multi_block_vkey_u8);
     let agg_vkey_hash = B256::from_str(&agg_vk.bytes32()).unwrap();
-
-    // local cuda prover setup for fallback
-    let cuda_prover = Arc::new(ProverClient::builder().cuda().build());
 
     let fetcher = OPSuccinctDataFetcher::new_with_rollup_config(RunContext::Docker).await?;
     // Note: The rollup config hash never changes for a given chain, so we can just hash it once at
@@ -132,7 +129,6 @@ async fn main() -> Result<()> {
         agg_proof_mode,
         network_prover,
         prover_network_retries,
-        cuda_prover,
         local_proving_only,
         proof_cache,
         worker_registry_client,
@@ -441,6 +437,7 @@ async fn get_proof_status(
     // first, check to see if it's a proof we have stored in the cache
     let proof_cache = state.proof_cache.read().await;
     if let Some(proof_bytes) = proof_cache.read_proof(&proof_id).context("read proof")? {
+        info!("Found proof {proof_id} on disk cache");
         return Ok((
             StatusCode::OK,
             Json(ProofStatus {
@@ -452,165 +449,36 @@ async fn get_proof_status(
     }
     drop(proof_cache);
 
-    if state.local_proving_only {
-        // we should never get here.  If we're local proving only and a proof that was requested
-        // wasn't found locally we should send a response that prompts the proposer to retry that
-        // proof request.
-        error!(
-            "Status of proof {} not found locally.  Returning response to proposer to prompt retry",
-            proof_id
-        );
-
-        // When the proposer sees a FulfillmentStatus of Unfulfillable it will retry the proof
-        // request.  If the prover network is really down, the new request will fail inside
-        // `request_agg/span_proof()` and will be re-routed as a local proof
-        return Ok((
-            StatusCode::OK,
-            Json(ProofStatus {
-                fulfillment_status: FulfillmentStatus::Unfulfillable.into(),
-                // if execution status is also `Unexecutable`, then the retry proof request
-                // will be half the block size.  This keeps the request the same
-                execution_status: ExecutionStatus::UnspecifiedExecutionStatus.into(),
-                proof: vec![],
-            }),
-        ));
-    }
-
-    let network_proof_status_request = || state.network_prover.get_proof_status(proof_id);
-
-    // try to get the proof status, returning a failure to the proposer if it seems that the prover
-    // network is down
-    let (status, maybe_proof) = match request_with_retries(
-        state.prover_network_retries,
-        network_proof_status_request,
-    )
-    .await
-    {
-        Ok(res) => res,
-        Err(_) => {
-            error!(
-                "Prover network request for status of proof {} failed",
-                proof_id
-            );
-
-            // When the proposer sees a FulfillmentStatus of Unfulfillable it will retry the proof
-            // request.  If the prover network is really down, the new request will fail inside
-            // `request_agg/span_proof()` and will be re-routed as a local proof
-            return Ok((
-                StatusCode::OK,
-                Json(ProofStatus {
-                    fulfillment_status: FulfillmentStatus::Unfulfillable.into(),
-                    // if execution status is also `Unexecutable`, then the retry proof request
-                    // will be half the block size.  This keeps the request the same
-                    execution_status: ExecutionStatus::UnspecifiedExecutionStatus.into(),
-                    proof: vec![],
-                }),
-            ));
+    // check worker_registry to see if we sent it to the local prover network.
+    let start = Instant::now();
+    let proof_status = state.worker_registry_client.proof_status(proof_id).await?;
+    info!(
+        "Took {} seconds to get proof status from worker",
+        start.elapsed().as_secs_f64()
+    );
+    // we got a proof status from the worker_registry
+    if let Some(proof_status) = proof_status {
+        if proof_status.fulfillment_status == FulfillmentStatus::Fulfilled as i32 {
+            info!("Found proof {proof_id} on worker network");
+            write_proof_to_cache(&state, proof_status.proof.clone(), &proof_id)
+                .await
+                .context("worker proof")?;
         }
-    };
-
-    /* FOR REFERENCE
-    #[repr(i32)]
-    pub enum ExecutionStatus {
-        UnspecifiedExecutionStatus = 0,
-        /// The request has not been executed.
-        Unexecuted = 1,
-        /// The request has been executed.
-        Executed = 2,
-        /// The request cannot be executed.
-        Unexecutable = 3,
+        Ok((StatusCode::OK, Json(proof_status)))
     }
-
-    #[repr(i32)]
-    pub enum FulfillmentStatus {
-        UnspecifiedFulfillmentStatus = 0,
-        /// The request has been requested.
-        Requested = 1,
-        /// The request has been assigned to a fulfiller.
-        Assigned = 2,
-        /// The request has been fulfilled.
-        Fulfilled = 3,
-        /// The request cannot be fulfilled.
-        Unfulfillable = 4,
+    // if we're useing the prover network
+    else if !state.local_proving_only {
+        let proof_status = get_proof_status_from_network(&state, proof_id).await?;
+        if proof_status.fulfillment_status == FulfillmentStatus::Fulfilled as i32 {
+            info!("Found proof {proof_id} on prover network");
+            write_proof_to_cache(&state, proof_status.proof.clone(), &proof_id)
+                .await
+                .context("worker proof")?;
+        }
+        Ok((StatusCode::OK, Json(proof_status)))
+    } else {
+        Ok((StatusCode::OK, Json(ProofStatus::lost())))
     }
-    * */
-
-    // Check the deadline.
-    if status.deadline
-        < SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_secs()
-    {
-        error!(
-            "Proof request timed out on the server. Default timeout is set to 4 hours. Returning status as Unfulfillable."
-        );
-        return Ok((
-            StatusCode::OK,
-            Json(ProofStatus {
-                fulfillment_status: FulfillmentStatus::Unfulfillable.into(),
-                execution_status: ExecutionStatus::Executed.into(),
-                proof: vec![],
-            }),
-        ));
-    }
-
-    let fulfillment_status = status.fulfillment_status;
-    let execution_status = status.execution_status;
-    if fulfillment_status == FulfillmentStatus::Fulfilled as i32 {
-        let proof: SP1ProofWithPublicValues = maybe_proof.unwrap();
-
-        let proof_bytes = match proof.proof {
-            SP1Proof::Compressed(_) => {
-                // If it's a compressed proof, we need to serialize the entire struct with bincode.
-                // Note: We're re-serializing the entire struct with bincode here, but this is fine
-                // because we're on localhost and the size of the struct is small.
-                bincode::serialize(&proof).unwrap()
-            }
-            SP1Proof::Groth16(_) => {
-                // If it's a groth16 proof, we need to get the proof bytes that we put on-chain.
-                proof.bytes()
-            }
-            SP1Proof::Plonk(_) => {
-                // If it's a plonk proof, we need to get the proof bytes that we put on-chain.
-                proof.bytes()
-            }
-            _ => {
-                log::error!("unknown proof type: {proof:?}");
-                return Err(AppError(anyhow::anyhow!("unknown proof type: {proof:?}")));
-            }
-        };
-
-        write_proof_to_cache(&state, proof_bytes.clone(), &proof_id)
-            .await
-            .context("network proof")?;
-
-        return Ok((
-            StatusCode::OK,
-            Json(ProofStatus {
-                fulfillment_status,
-                execution_status,
-                proof: proof_bytes,
-            }),
-        ));
-    } else if fulfillment_status == FulfillmentStatus::Unfulfillable as i32 {
-        return Ok((
-            StatusCode::OK,
-            Json(ProofStatus {
-                fulfillment_status,
-                execution_status,
-                proof: vec![],
-            }),
-        ));
-    }
-    Ok((
-        StatusCode::OK,
-        Json(ProofStatus {
-            fulfillment_status,
-            execution_status,
-            proof: vec![],
-        }),
-    ))
 }
 
 async fn worker_ready(
@@ -633,9 +501,9 @@ async fn worker_ready(
     Ok(())
 }
 
-// if LOCAL_PROVING_ONLY is set to true, request a local proof
+// if LOCAL_PROVING_ONLY is set to true, request a proof to our worker network
 // otherwise, make a request to the prover network.  If this request
-// fails PROVER_NETWORK_RETRIES times, then fall back to local proving
+// fails PROVER_NETWORK_RETRIES times, then fall back to local prover network
 async fn route_proof(
     proof_request: &GenericProofRequest,
     state: &SuccinctProposerConfig,
@@ -646,7 +514,7 @@ async fn route_proof(
         state
             .worker_registry_client
             .assign_proof_request(proof_id, proof_request.clone())
-            .await;
+            .await?;
         Ok(proof_id)
     } else {
         let prover_network_response = match proof_request {
@@ -692,106 +560,12 @@ async fn route_proof(
                 state
                     .worker_registry_client
                     .assign_proof_request(proof_id, proof_request.clone())
-                    .await;
+                    .await?;
                 Ok(proof_id)
             }
         }
     }
 }
-
-/*
-fn locally_prove(
-    proof_type: ProofType,
-    cuda_prover: Arc<CudaProver>,
-    sp1_stdin: SP1Stdin,
-) -> Result<B256, AppError> {
-    let proof_id = B256::random();
-
-    let initial_status = ProofStatus {
-        fulfillment_status: FulfillmentStatus::Assigned.into(),
-        execution_status: ExecutionStatus::Unexecuted.into(),
-        proof: Vec::new(),
-    };
-
-    tokio::spawn(async move {
-        let start_time = tokio::time::Instant::now();
-        info!("computing {proof_type} proof with id {:?}", proof_id);
-
-        let proof_res = match proof_type {
-            ProofType::Span => {
-                // the cuda prover keeps state of the last `setup()` that was called on it.
-                // You must call `setup()` then `prove` *each* time you intend to
-                // prove a certain program
-                let (proving_key, _) = cuda_prover.setup(RANGE_ELF);
-                cuda_prover
-                    .prove(&proving_key, &sp1_stdin)
-                    .compressed()
-                    .run()
-            }
-            ProofType::Agg => {
-                // the cuda prover keeps state of the last `setup()` that was called on it.
-                // You must call `setup()` then `prove` *each* time you intend to
-                // prove a certain program
-                let (proving_key, _) = cuda_prover.setup(AGG_ELF);
-                cuda_prover.prove(&proving_key, &sp1_stdin).groth16().run()
-            }
-        };
-
-        let proof_status = match proof_res {
-            // proof is done, can return it
-            Ok(proof) => {
-                match proof.proof {
-                    SP1Proof::Compressed(_) => {
-                        // If it's a compressed proof, we need to serialize the entire struct with bincode.
-                        // Note: We're re-serializing the entire struct with bincode here, but this is fine
-                        // because we're on localhost and the size of the struct is small.
-                        let proof_bytes = bincode::serialize(&proof).unwrap();
-                        ProofStatus {
-                            fulfillment_status: FulfillmentStatus::Fulfilled.into(),
-                            execution_status: ExecutionStatus::Executed.into(),
-                            proof: proof_bytes,
-                        }
-                    }
-                    SP1Proof::Groth16(_) => {
-                        // If it's a groth16 proof, we need to get the proof bytes that we put on-chain.
-                        let proof_bytes = proof.bytes();
-                        ProofStatus {
-                            fulfillment_status: FulfillmentStatus::Fulfilled.into(),
-                            execution_status: ExecutionStatus::Executed.into(),
-                            proof: proof_bytes,
-                        }
-                    }
-                    SP1Proof::Plonk(_) => {
-                        // If it's a plonk proof, we need to get the proof bytes that we put on-chain.
-                        let proof_bytes = proof.bytes();
-                        ProofStatus {
-                            fulfillment_status: FulfillmentStatus::Fulfilled.into(),
-                            execution_status: ExecutionStatus::Executed.into(),
-                            proof: proof_bytes,
-                        }
-                    }
-                    _ => {
-                        log::error!("unknown proof type: {proof:?}");
-                        return Err(AppError(anyhow::anyhow!("unknown proof type: {proof:?}")));
-                    }
-                }
-            }
-            Err(e) => {
-                log::error!("error proving {e}");
-                return Err(AppError(anyhow::anyhow!("error proving {e}")));
-            }
-        };
-
-        info!("proof completed. id {:?}", proof_id);
-        let minutes = start_time.elapsed().as_secs_f64() / 60.0;
-        info!("Time to compute {proof_type} proof: {} minutes", minutes);
-
-        Ok(())
-    });
-
-    Ok(proof_id)
-}
-*/
 
 async fn write_proof_to_cache(
     state: &SuccinctProposerConfig,
@@ -925,4 +699,101 @@ async fn generate_agg_sp1_stdin(
             Err(anyhow::anyhow!("Failed to get agg proof stdin: {}", e))
         }
     }
+}
+
+async fn get_proof_status_from_network(
+    state: &SuccinctProposerConfig,
+    proof_id: B256,
+) -> Result<ProofStatus> {
+    let network_proof_status_request = || state.network_prover.get_proof_status(proof_id);
+
+    // try to get the proof status, returning a failure to the proposer if it seems that the prover
+    // network is down
+    let (status, maybe_proof) = match request_with_retries(
+        state.prover_network_retries,
+        network_proof_status_request,
+    )
+    .await
+    {
+        Ok(res) => res,
+        Err(err) => {
+            error!(
+                "Prover network request for status of proof {} failed: {err}",
+                proof_id
+            );
+
+            // When the proposer sees a FulfillmentStatus of Unfulfillable it will retry the proof
+            // request.  If the prover network is really down, the new request will fail inside
+            // `request_agg/span_proof()` and will be re-routed as a local proof
+            return Ok(ProofStatus {
+                fulfillment_status: FulfillmentStatus::Unfulfillable.into(),
+                // if execution status is also `Unexecutable`, then the retry proof request
+                // will be half the block size.  This keeps the request the same
+                execution_status: ExecutionStatus::UnspecifiedExecutionStatus.into(),
+                proof: vec![],
+            });
+        }
+    };
+
+    // Check the deadline.
+    if status.deadline
+        < SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs()
+    {
+        error!(
+            "Proof request timed out on the server. Default timeout is set to 4 hours. Returning status as Unfulfillable."
+        );
+        return Ok(ProofStatus {
+            fulfillment_status: FulfillmentStatus::Unfulfillable.into(),
+            execution_status: ExecutionStatus::Executed.into(),
+            proof: vec![],
+        });
+    }
+
+    let fulfillment_status = status.fulfillment_status;
+    let execution_status = status.execution_status;
+    if fulfillment_status == FulfillmentStatus::Fulfilled as i32 {
+        let proof: SP1ProofWithPublicValues = maybe_proof.unwrap();
+
+        let proof_bytes = match proof.proof {
+            SP1Proof::Compressed(_) => {
+                // If it's a compressed proof, we need to serialize the entire struct with bincode.
+                // Note: We're re-serializing the entire struct with bincode here, but this is fine
+                // because we're on localhost and the size of the struct is small.
+                bincode::serialize(&proof).unwrap()
+            }
+            SP1Proof::Groth16(_) => {
+                // If it's a groth16 proof, we need to get the proof bytes that we put on-chain.
+                proof.bytes()
+            }
+            SP1Proof::Plonk(_) => {
+                // If it's a plonk proof, we need to get the proof bytes that we put on-chain.
+                proof.bytes()
+            }
+            _ => {
+                log::error!("unknown proof type: {proof:?}");
+                return Err(anyhow::anyhow!("unknown proof type: {proof:?}"));
+            }
+        };
+
+        return Ok(ProofStatus {
+            fulfillment_status,
+            execution_status,
+            proof: proof_bytes,
+        });
+    } else if fulfillment_status == FulfillmentStatus::Unfulfillable as i32 {
+        return Ok(ProofStatus {
+            fulfillment_status,
+            execution_status,
+            proof: vec![],
+        });
+    }
+
+    Ok(ProofStatus {
+        fulfillment_status,
+        execution_status,
+        proof: vec![],
+    })
 }

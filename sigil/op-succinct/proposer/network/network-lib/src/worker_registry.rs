@@ -1,4 +1,7 @@
-use crate::{GenericProofRequest, ProofStatus, WorkerAggProofRequest, WorkerSpanProofRequest};
+use crate::{
+    request_with_retries, GenericProofRequest, ProofStatus, WorkerAggProofRequest,
+    WorkerSpanProofRequest,
+};
 use alloy_primitives::B256;
 use anyhow::{Context, Result};
 use log::{debug, error, info};
@@ -9,6 +12,8 @@ use tokio::sync::{mpsc, oneshot};
 // Worker strikes start at 0 and increment by 1 on every failed request.  When a worker's strikes
 // are >= this value, the worker is removed from the registry
 const MAX_WORKER_STRIKES: u16 = 3;
+
+const PROVER_NETWORK_RETRIES: usize = 3;
 
 #[derive(Clone)]
 pub struct WorkerRegistryClient {
@@ -41,11 +46,70 @@ impl WorkerRegistryClient {
     }
 
     pub async fn worker_ready(&self, worker_addr: String) -> Result<()> {
-        self.sender.send(WorkerRegistryCommand::WorkerReady { worker_addr}).await.map_err(|e| anyhow::anyhow!("Failed to send command WorkerReady: {}", e))
+        self.sender
+            .send(WorkerRegistryCommand::WorkerReady { worker_addr })
+            .await
+            .map_err(|e| anyhow::anyhow!("Failed to send command WorkerReady: {}", e))
     }
 
-    pub async fn assign_proof_request(&self, proof_id: B256, proof_request: GenericProofRequest) -> Result<()>{
-        self.sender.send(WorkerRegistryCommand::AssignProofRequest { proof_id, proof_request }).await.map_err(|e| anyhow::anyhow!("Failed to send command AssignProofRequest: {}", e))
+    pub async fn assign_proof_request(
+        &self,
+        proof_id: B256,
+        proof_request: GenericProofRequest,
+    ) -> Result<()> {
+        self.sender
+            .send(WorkerRegistryCommand::AssignProofRequest {
+                proof_id,
+                proof_request,
+            })
+            .await
+            .map_err(|e| anyhow::anyhow!("Failed to send command AssignProofRequest: {}", e))
+    }
+
+    // run until we get None (no worker has this proof) or Some(Ok(ProofStatus)).
+    // Each run it potentially trims naughty workers
+    pub async fn proof_status(&self, proof_id: B256) -> Result<Option<ProofStatus>> {
+        let mut a_worker_is_assigned = false;
+        loop {
+            let (resp_sender, receiver) = oneshot::channel();
+            self.sender
+                .send(WorkerRegistryCommand::ProofStatus {
+                    target_proof_id: proof_id,
+                    resp_sender,
+                })
+                .await
+                .map_err(|e| anyhow::anyhow!("Failed to send command ProofStatus: {}", e))?;
+
+            match receiver.await? {
+                // worker_registry doesn't have any worker assigned to this proof
+                None => {
+                    if a_worker_is_assigned {
+                        error!("Worker assigned to proof {proof_id} was kicked from the worker registry.");
+                        // we know from a previous response that there was a worker assigned to
+                        // this proof, but now worker_registry is returning None, meaning the
+                        // worker that was assign stopped responded and was removed from the
+                        // registry
+                        return Ok(Some(ProofStatus::lost()));
+                    } else {
+                        // no worker is assigned to this proof
+                        debug!("proof {proof_id} was not assigned to a worker");
+                        // otherwise, the registry doesn't have any worker assigned to this proof
+                        return Ok(None);
+                    }
+                }
+                // got proof status from worker
+                Some(Ok(proof_status)) => {
+                    return Ok(Some(proof_status));
+                }
+                // Worker assigned to this proof didn't return proof status
+                Some(Err(worker_addr)) => {
+                    error!("Worker {worker_addr} assigned to proof {proof_id} didn't return proof status");
+                    // we know a worker was working on this proof, but we didn't get a response
+                    // from them
+                    a_worker_is_assigned = true;
+                }
+            }
+        }
     }
 }
 
@@ -80,8 +144,11 @@ impl WorkerRegistry {
                     info!("{} workers found", self.workers.len());
 
                     // first check if there's already a worker working on this proof
-                    if let Some((worker_addr, _))  = self.workers.iter().find(|(_, worker_state)| {
-                        if let WorkerStatus::Busy { proof_id: workers_proof_id } = worker_state.status {
+                    if let Some((worker_addr, _)) = self.workers.iter().find(|(_, worker_state)| {
+                        if let WorkerStatus::Busy {
+                            proof_id: workers_proof_id,
+                        } = worker_state.status
+                        {
                             workers_proof_id == proof_id
                         } else {
                             false
@@ -130,30 +197,8 @@ impl WorkerRegistry {
                             }
                         };
 
-                        match worker_response {
-                            Ok(response) => {
-                                // match so we can get the error code
-                                if response.status().is_success() {
-                                    info!(
-                                        "Successfully assigned proof {} to worker {}",
-                                        proof_id, worker_addr
-                                    );
-
-                                    worker_state.assigned_proof(proof_id);
-                                    return;
-                                } else {
-                                    // TODO: could make a StrikeWorker command then make handling
-                                    // reqwest responses more async by moving them to a tokio task
-                                    worker_state.add_strike();
-                                    error!(
-                                        "Failed to assign proof {} to worker {}. Status code {}: {:?}",
-                                        proof_id,
-                                        worker_addr,
-                                        response.status().as_u16(),
-                                        response.status().canonical_reason()
-                                    );
-                                }
-                            }
+                        let response = match worker_response {
+                            Ok(response) => response,
                             Err(err) => {
                                 // TODO: could make a StrikeWorker command then make handling
                                 // reqwest responses more async by moving them to a tokio task
@@ -162,7 +207,31 @@ impl WorkerRegistry {
                                     "Failed to send request for proof {} to worker {}. Error: {}",
                                     proof_id, worker_addr, err
                                 );
+                                // go to next loop iteration
+                                continue;
                             }
+                        };
+
+                        if response.status().is_success() {
+                            info!(
+                                "Successfully assigned proof {} to worker {}",
+                                proof_id, worker_addr
+                            );
+
+                            // successfully assigned proof, can exit
+                            worker_state.assigned_proof(proof_id);
+                            return;
+                        } else {
+                            // TODO: could make a StrikeWorker command then make handling
+                            // reqwest responses more async by moving them to a tokio task
+                            worker_state.add_strike();
+                            error!(
+                                "Failed to assign proof {} to worker {}. Status code {}: {:?}",
+                                proof_id,
+                                worker_addr,
+                                response.status().as_u16(),
+                                response.status().canonical_reason()
+                            );
                         }
                     }
                     // We iterated through all the workers and couldn't find an idle one who could
@@ -211,78 +280,92 @@ impl WorkerRegistry {
                     target_proof_id,
                     resp_sender,
                 } => {
-                    // get worker assigned to this proof, forward proof_status request to them
-                    match self
-                        .workers
-                        .iter_mut()
-                        .find(|(_, worker_state)| match worker_state.status {
-                            WorkerStatus::Idle => false,
-                            WorkerStatus::Busy { proof_id } => proof_id == target_proof_id,
-                        }) {
-                        Some((worker_addr, worker_state)) => {
-                            let worker_response = self
-                                .reqwest_client
-                                .get(format!("{}/status/{}", worker_addr, target_proof_id))
-                                .send()
-                                .await;
-
-                            match worker_response {
-                                Ok(response) => {
-                                    // match so we can get the error code
-                                    if response.status().is_success() {
-                                        let proof_status: ProofStatus =
-                                            match response.json().await {
-                                            Ok(proof_status) => proof_status,
-                                            Err(err) => {
-                                                worker_state.add_strike();
-                                                error!("Error deserializing response from {}/status{}.Error: {}", worker_addr, target_proof_id, err);
-                                                // TODO: return lost proof status or re-try this
-                                                // request??
-                                                return;
-                                            }
-                                        };
-                                        debug!(
-                                            "ProofStatus of {} from worker {}: {}",
-                                            target_proof_id, worker_addr, proof_status
-                                        );
-
-                                        // TODO: handle result
-                                        resp_sender.send(proof_status);
-                                    } else {
-                                        // TODO: could make a StrikeWorker command then make handling
-                                        // reqwest responses more async by moving them to a tokio task
-                                        worker_state.add_strike();
-                                        error!(
-                                            "Failed to get response from {}/status/{}. Status code {}: {:?}",
-                                            worker_addr, 
-                                            target_proof_id,
-                                            response.status().as_u16(),
-                                            response.status().canonical_reason()
-                                        );
-
-                                        // TODO: return lost proof status or re-try this
-                                        // request??
-                                    }
-                                }
-                                Err(err) => {
-                                    // TODO: could make a StrikeWorker command then make handling
-                                    // reqwest responses more async by moving them to a tokio task
-                                    worker_state.add_strike();
-                                        error!(
-                                        "Failed to send request {}/status/{}. Error: {}",
-                                        worker_addr, target_proof_id,  err
-                                    );
-
-                                    // TODO: return lost proof status or re-try this
-                                    // request??
-                                }
+                    // remove any dead workers
+                    self.trim_workers();
+                    // get worker assigned to this proof, if any
+                    let (worker_addr, worker_state) =
+                        match self.workers.iter_mut().find(|(_, worker_state)| {
+                            match worker_state.status {
+                                WorkerStatus::Idle => false,
+                                WorkerStatus::Busy { proof_id } => proof_id == target_proof_id,
                             }
+                        }) {
+                            Some(worker_assigned) => worker_assigned,
+                            None => {
+                                // This proof wasn't assigned to any worker, return none
+                                info!("No worker is assigned to proof {}", target_proof_id);
+                                resp_sender.send(None);
+                                return;
+                            }
+                        };
+
+                    // forward proof_status request to worker
+                    let worker_proof_status_request = || {
+                        self.reqwest_client
+                            .get(format!("{}/status/{}", worker_addr, target_proof_id))
+                            .send()
+                    };
+
+                    let response = match request_with_retries(
+                        PROVER_NETWORK_RETRIES,
+                        worker_proof_status_request,
+                    )
+                    .await
+                    {
+                        Ok(worker_response) => worker_response,
+                        Err(err) => {
+                            // TODO: could make a StrikeWorker command then make handling
+                            // reqwest responses more async by moving them to a tokio task
+                            worker_state.add_strikes(PROVER_NETWORK_RETRIES.try_into().unwrap());
+                            error!(
+                                "Failed to send request {}/status/{}. Error: {}",
+                                worker_addr, target_proof_id, err
+                            );
+                            // there's a worker assigned but we can't communicate with it.  Assume
+                            // it's dead & tell proposer we lost the proof
+                            resp_sender.send(Some(Ok(ProofStatus::lost())));
+
+                            return;
                         }
-                        None => {
-                            error!("No worker is working on proof {}", target_proof_id);
-                            // TODO: return lost proof status or re-try this
-                            // TODO: missing proof resolution
-                        }
+                    };
+
+                    if response.status().is_success() {
+                        let proof_status: ProofStatus = match response.json().await {
+                            Ok(proof_status) => proof_status,
+                            Err(err) => {
+                                worker_state.add_strike();
+                                error!(
+                                    "Error deserializing response from {}/status{}.Error: {}",
+                                    worker_addr, target_proof_id, err
+                                );
+
+                                // can't deserialize request
+                                resp_sender.send(Some(Err(worker_addr.clone())));
+
+                                return;
+                            }
+                        };
+                        debug!(
+                            "ProofStatus of {} from worker {}: {}",
+                            target_proof_id, worker_addr, proof_status
+                        );
+
+                        resp_sender.send(Some(Ok(proof_status)));
+                    } else {
+                        // TODO: could make a StrikeWorker command then make handling
+                        // reqwest responses more async by moving them to a tokio task
+                        worker_state.add_strike();
+                        error!(
+                            "Failed to get response from {}/status/{}. Status code {}: {:?}",
+                            worker_addr,
+                            target_proof_id,
+                            response.status().as_u16(),
+                            response.status().canonical_reason()
+                        );
+
+                        // response status not-ok
+                        resp_sender.send(Some(Err(worker_addr.clone())));
+                        return;
                     }
                 }
             }
@@ -305,8 +388,9 @@ impl WorkerRegistry {
             .collect();
 
         for dead_worker_addr in dead_workers {
-            // remove them from the mapping & re-request any proofs they were working on
+            // remove them from the mapping
             if let Some(dead_worker_state) = self.workers.remove(&dead_worker_addr) {
+                info!("Removing worker {dead_worker_addr} from worker registry");
                 if let Some(dangling_proof) = dead_worker_state.current_proof_id() {
                     // TODO: re-request the proof somehow.  Depends on if we want this to bubble up
                     // to coordinator or not.  Probably should to check if we already have the
@@ -329,13 +413,16 @@ pub enum WorkerRegistryCommand {
         proof_id: B256,
         proof_request: GenericProofRequest,
     },
+    WorkerReady {
+        worker_addr: String,
+    },
     ProofStatus {
         target_proof_id: B256,
         // returns the proof_status to the calling thread
-        resp_sender: oneshot::Sender<ProofStatus>,
-    },
-    WorkerReady {
-        worker_addr: String,
+        // returns None if there is no worker assigned to this proof
+        // returns Some(Err(worker_addr)) if there is worker assigned to that is communicating with
+        // us but we can't get the proof status out of it
+        resp_sender: oneshot::Sender<Option<std::result::Result<ProofStatus, String>>>,
     },
     ProofComplete {
         worker_addr: String,
@@ -365,6 +452,14 @@ impl WorkerState {
     fn add_strike(&mut self) {
         self.strikes += 1;
         debug!("Strike added to worker.  New strikes: {}", self.strikes);
+    }
+
+    fn add_strikes(&mut self, strikes: u16) {
+        self.strikes += strikes;
+        debug!(
+            "{} strikes added to worker.  New strikes: {}",
+            strikes, self.strikes
+        );
     }
 
     fn assigned_proof(&mut self, proof_id: B256) {
