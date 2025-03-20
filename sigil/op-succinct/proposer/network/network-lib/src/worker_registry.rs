@@ -6,8 +6,11 @@ use alloy_primitives::B256;
 use anyhow::Result;
 use log::{debug, error, info, warn};
 use reqwest::Client;
-use std::{collections::HashMap, fmt::Display};
-use tokio::sync::{mpsc, oneshot};
+use std::{collections::HashMap, fmt::Display, time::Duration};
+use tokio::{
+    sync::{mpsc, oneshot},
+    time::sleep,
+};
 
 #[derive(Clone)]
 pub struct WorkerRegistryClient {
@@ -194,7 +197,14 @@ impl WorkerRegistry {
     async fn handle_assign_proof(&mut self, proof_id: B256, proof_request: &GenericProofRequest) {
         // remove any dead workers
         self.trim_workers();
-        info!("{} workers found", self.workers.len());
+        let workers = self.workers.len();
+        if workers == 0 {
+            info!("0 workers found");
+            // sleep a little so it doesn't spam the terminal
+            sleep(Duration::from_secs(10)).await;
+        } else {
+            info!("{workers} workers found");
+        }
 
         // first check if there's already a worker working on this proof
         if let Some((worker_addr, _)) = self.workers.iter().find(|(_, worker_state)| {
@@ -225,6 +235,7 @@ impl WorkerRegistry {
                 continue;
             }
 
+            // TODO: this blocks up things for AWHILE (entire time witnessgen is going on)
             let worker_response = match &proof_request {
                 GenericProofRequest::Agg(agg_proof_request) => {
                     let worker_agg_proof_request = WorkerAggProofRequest {

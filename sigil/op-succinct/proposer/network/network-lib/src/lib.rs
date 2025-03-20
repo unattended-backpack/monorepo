@@ -41,13 +41,6 @@ pub struct SpanProofRequest {
     pub end: u64,
 }
 
-#[derive(Deserialize, Serialize, Debug, Default, Clone, Copy)]
-pub struct WorkerSpanProofRequest {
-    pub proof_id: B256,
-    pub start: u64,
-    pub end: u64,
-}
-
 impl Display for SpanProofRequest {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
@@ -58,6 +51,13 @@ impl Display for SpanProofRequest {
     }
 }
 
+#[derive(Deserialize, Serialize, Debug, Default, Clone, Copy)]
+pub struct WorkerSpanProofRequest {
+    pub proof_id: B256,
+    pub start: u64,
+    pub end: u64,
+}
+
 // TODO: remove Clone from this.  It's big
 #[derive(Clone, Deserialize, Serialize, Debug)]
 pub struct AggProofRequest {
@@ -66,12 +66,25 @@ pub struct AggProofRequest {
     pub head: String,
 }
 
-#[derive(Deserialize, Serialize, Debug)]
+// TODO: remove Clone from this.  It's big
+#[derive(Deserialize, Serialize, Debug, Clone)]
 pub struct WorkerAggProofRequest {
     pub proof_id: B256,
     #[serde(deserialize_with = "deserialize_base64_vec")]
     pub subproofs: Vec<Vec<u8>>,
     pub head: String,
+}
+
+impl WorkerAggProofRequest {
+    pub fn split_to_generic(self) -> (B256, GenericProofRequest) {
+        let proof_id = self.proof_id;
+        let agg_request = AggProofRequest {
+            subproofs: self.subproofs,
+            head: self.head,
+        };
+
+        (proof_id, GenericProofRequest::Agg(agg_request))
+    }
 }
 
 #[derive(Clone)]
@@ -88,6 +101,16 @@ impl From<AggProofRequest> for GenericProofRequest {
 
 impl From<SpanProofRequest> for GenericProofRequest {
     fn from(span_request: SpanProofRequest) -> Self {
+        GenericProofRequest::Span(span_request)
+    }
+}
+
+impl From<WorkerSpanProofRequest> for GenericProofRequest {
+    fn from(span_request: WorkerSpanProofRequest) -> Self {
+        let span_request = SpanProofRequest {
+            start: span_request.start,
+            end: span_request.end,
+        };
         GenericProofRequest::Span(span_request)
     }
 }
