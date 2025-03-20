@@ -403,7 +403,7 @@ impl WorkerRegistry {
                     worker_addr, target_proof_id, err
                 );
                 // there's a worker assigned but we can't communicate with it.  Assume
-                // it's dead & tell proposer we lost the proof
+                // it's dead & tell coordinator we lost the proof
                 resp_sender.send(Some(Ok(ProofStatus::lost())));
 
                 return;

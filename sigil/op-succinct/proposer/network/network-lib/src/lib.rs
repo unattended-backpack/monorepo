@@ -177,10 +177,15 @@ pub struct ProofStatus {
 impl ProofStatus {
     pub fn lost() -> Self {
         Self {
-            fulfillment_status: FulfillmentStatus::Unfulfillable.into(),
-            execution_status: ExecutionStatus::Unexecuted.into(),
+            fulfillment_status: FulfillmentStatus::UnspecifiedFulfillmentStatus.into(),
+            execution_status: ExecutionStatus::UnspecifiedExecutionStatus.into(),
             proof: vec![],
         }
+    }
+
+    pub fn is_lost(&self) -> bool {
+        self.fulfillment_status == FulfillmentStatus::Unfulfillable as i32
+            && self.execution_status == ExecutionStatus::UnspecifiedExecutionStatus as i32
     }
 }
 

@@ -1,6 +1,6 @@
 use alloy_primitives::{hex, Address, B256};
 
-use anyhow::{Context, Result};
+use anyhow::{anyhow, Context, Result};
 use axum::{
     extract::{DefaultBodyLimit, Path, State},
     http::StatusCode,
@@ -499,6 +499,13 @@ async fn get_proof_status(
     // we got a proof status from the worker_registry
     if let Some(proof_status) = proof_status {
         info!("Proof status {proof_status}");
+
+        // if the proof was lost by the worker network we have to re-request it
+        if proof_status.is_lost() {
+            let proof_status = re_assign_lost_proof(&state, proof_id).await?;
+            return Ok((StatusCode::OK, Json(proof_status)));
+        }
+
         if proof_status.fulfillment_status == FulfillmentStatus::Fulfilled as i32 {
             info!("Found completed proof {proof_id} on worker network");
             write_proof_to_cache(&state, proof_status.proof.clone(), &proof_id)
@@ -525,9 +532,11 @@ async fn get_proof_status(
         info!("Found proof status {proof_status} in prover network");
         Ok((StatusCode::OK, Json(proof_status)))
     } else {
-        let lost_proof_status = ProofStatus::lost();
-        info!("Couldn't find proof status in worker registry, cache, or prover network.  Returning {lost_proof_status}");
-        Ok((StatusCode::OK, Json(lost_proof_status)))
+        // can't find proof anywhere.  Re-request it
+        info!("Couldn't find proof status in worker registry, cache, or prover network.  Re-requesting proof {proof_id}");
+        let proof_status = re_assign_lost_proof(&state, proof_id).await?;
+
+        Ok((StatusCode::OK, Json(proof_status)))
     }
 }
 
@@ -840,6 +849,41 @@ async fn get_proof_status_from_network(
     Ok(ProofStatus {
         fulfillment_status,
         execution_status,
+        proof: vec![],
+    })
+}
+
+async fn re_assign_lost_proof(
+    state: &SuccinctProposerConfig,
+    proof_id: B256,
+) -> Result<ProofStatus, AppError> {
+    error!("proof was lost, re-assigning it to a worker");
+    let proof_request = match state
+        .proof_request_cache_client
+        .lookup_proof_request(&proof_id)
+        .await
+    {
+        Ok(Some(proof_request)) => proof_request,
+        Ok(None) => {
+            return Err(AppError(anyhow!("Couldn't find proof request {proof_id}")));
+        }
+        Err(e) => {
+            return Err(AppError(anyhow!(
+                "Error looking up proof request {proof_id}: {e}"
+            )));
+        }
+    };
+
+    info!("Attempting to route lost proof to the local prover network");
+
+    state
+        .worker_registry_client
+        .assign_proof_request(proof_id, proof_request.clone())
+        .await?;
+
+    Ok(ProofStatus {
+        fulfillment_status: FulfillmentStatus::Requested.into(),
+        execution_status: ExecutionStatus::Unexecuted.into(),
         proof: vec![],
     })
 }
