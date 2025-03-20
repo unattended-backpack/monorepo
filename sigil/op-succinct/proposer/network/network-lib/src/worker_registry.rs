@@ -133,7 +133,6 @@ pub struct WorkerRegistry {
     pub self_command_sender: mpsc::Sender<WorkerRegistryCommand>,
 }
 
-// TODO: extract into `handle_xyz()` functions
 impl WorkerRegistry {
     async fn background_event_loop(mut self) {
         while let Some(command) = self.receiver.recv().await {
@@ -202,9 +201,10 @@ impl WorkerRegistry {
             info!("0 workers found");
             // sleep a little so it doesn't spam the terminal
             sleep(Duration::from_secs(10)).await;
-        } else {
-            info!("{workers} workers found");
         }
+        // else {
+        //     debug!("{workers} workers found");
+        // }
 
         // first check if there's already a worker working on this proof
         if let Some((worker_addr, _)) = self.workers.iter().find(|(_, worker_state)| {

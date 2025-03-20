@@ -1,4 +1,5 @@
 pub mod proof_cache;
+pub mod proof_request_cache;
 pub mod worker_registry;
 
 use alloy_primitives::B256;
@@ -10,6 +11,7 @@ use axum::{
 use base64::{engine::general_purpose, Engine as _};
 use log::error;
 pub use proof_cache::ProofCache;
+pub use proof_request_cache::ProofRequestCacheClient;
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_repr::{Deserialize_repr, Serialize_repr};
 use sp1_sdk::{
@@ -236,6 +238,7 @@ pub struct SuccinctProposerConfig {
     pub local_proving_only: bool,
     pub proof_cache: ProofCacheWrapper,
     pub worker_registry_client: WorkerRegistryClient,
+    pub proof_request_cache_client: ProofRequestCacheClient,
 }
 
 pub type ProofStore = Arc<RwLock<HashMap<B256, ProofStatus>>>;

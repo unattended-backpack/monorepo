@@ -1,7 +1,7 @@
-use crate::SpanProofRequest;
+use crate::{GenericProofRequest, ProofRequestCacheClient, SpanProofRequest};
 use alloy_primitives::B256;
-use anyhow::{Context, Result};
-use log::info;
+use anyhow::{anyhow, Context, Result};
+use log::{error, info};
 use std::{collections::HashMap, fs, path::Path};
 
 // If the proving server goes offline and it has completed some span proofs, when it comes back up
@@ -23,11 +23,15 @@ pub struct ProofCache {
     // proof_requests and evict the address that we just replaced
     // (proof_id, proof_file_path_name)
     cache_list: Vec<(B256, String)>,
-    proof_request_lookup: HashMap<B256, SpanProofRequest>,
+    proof_request_cache_client: ProofRequestCacheClient,
 }
 
 impl ProofCache {
-    pub fn new(cache_size: usize, proof_cache_directory: &str) -> Result<Self> {
+    pub fn new(
+        cache_size: usize,
+        proof_cache_directory: &str,
+        proof_request_cache_client: ProofRequestCacheClient,
+    ) -> Result<Self> {
         // Create `proofs/` directory if it doesn't already exist
         let path = Path::new(proof_cache_directory);
         if !path.exists() {
@@ -42,25 +46,13 @@ impl ProofCache {
         // bounds
         cache_list.resize_with(cache_size, || (B256::default(), "empty".into()));
 
-        let proof_request_lookup = HashMap::new();
-
         Ok(Self {
             cache_size,
             proof_cache_directory: format!("{proof_cache_directory}"),
             current_cache_index: 0,
             cache_list,
-            proof_request_lookup,
+            proof_request_cache_client,
         })
-    }
-
-    // This is needed so in `write_proof()` we can get the proof file name (proof request start & end
-    // block) from the proof_id, which is the only argument we get sent in `/get_proof_status`
-    pub fn record_proof_request(&mut self, proof_id: &B256, proof_request: &SpanProofRequest) {
-        self.proof_request_lookup.insert(*proof_id, *proof_request);
-    }
-
-    pub fn lookup_proof_request(&self, proof_id: &B256) -> Option<&SpanProofRequest> {
-        self.proof_request_lookup.get(proof_id)
     }
 
     // If we have a proof locally we can save hours of time by skipping span proof generation.
@@ -85,16 +77,21 @@ impl ProofCache {
     // Retreive a proof that we previously computed.  This can save us hours of proving time.
     // Safe to call even if we're not sure we have a proof.
     // called in get_proof_status()
-    pub fn read_proof(&self, proof_id: &B256) -> Result<Option<Vec<u8>>> {
+    pub async fn read_proof(&self, proof_id: &B256) -> Result<Option<Vec<u8>>> {
         // if cache is disabled
         if self.cache_size == 0 {
             return Ok(None);
         }
 
-        match self.proof_request_lookup.get(proof_id) {
-            Some(proof_request) => {
+        let maybe_proof = self
+            .proof_request_cache_client
+            .lookup_proof_request(proof_id)
+            .await?;
+
+        match maybe_proof {
+            Some(GenericProofRequest::Span(proof_request)) => {
                 let proof_path_name =
-                    proof_request_to_file_path(&self.proof_cache_directory, proof_request);
+                    proof_request_to_file_path(&self.proof_cache_directory, &proof_request);
                 let proof_path = Path::new(&proof_path_name);
                 if proof_path.exists() {
                     info!(
@@ -112,6 +109,10 @@ impl ProofCache {
                     Ok(None)
                 }
             }
+            Some(GenericProofRequest::Agg(_)) => {
+                info!("Proof id {proof_id} is a agg proof.  Not returning from proof_cache because we never save agg proofs");
+                Ok(None)
+            }
             // we haven't received this proof request yet, it's not in the proof_request_lookup
             None => Ok(None),
         }
@@ -120,7 +121,7 @@ impl ProofCache {
     // writes the completed proof to file, deleting the Least Recently Completed proof that the
     // cache is aware of.
     // Takes a mutable reference, so only use this if you're sure the proof isn't already on disk
-    pub fn write_proof(&mut self, proof_bytes: Vec<u8>, proof_id: &B256) -> Result<()> {
+    pub async fn write_proof(&mut self, proof_bytes: Vec<u8>, proof_id: &B256) -> Result<()> {
         // if cache is disabled
         if self.cache_size == 0 {
             return Ok(());
@@ -148,13 +149,28 @@ impl ProofCache {
         }
 
         // get proof request parameters (needed for proof file name) from the proof_id
-        let proof_request = self.proof_request_lookup.get(proof_id).context(format!(
-            "span proof id {} not found in request hashmap",
-            proof_id
-        ))?;
+        let proof_request = match self
+            .proof_request_cache_client
+            .lookup_proof_request(proof_id)
+            .await
+        {
+            Ok(Some(GenericProofRequest::Span(span))) => span,
+            Ok(None) => {
+                error!("Couldn't find span proof {proof_id} in proof request cache");
+                return Err(anyhow!(
+                    "Couldn't find span proof {proof_id} in proof request cache"
+                ));
+            }
+            Ok(Some(GenericProofRequest::Agg(_))) => {
+                // we don't write agg proofs.  Just skip
+                return Ok(());
+            }
+            Err(e) => return Err(anyhow!(e)),
+        };
+
         // get proof file name so we can write
         let proof_path_name =
-            proof_request_to_file_path(&self.proof_cache_directory, proof_request);
+            proof_request_to_file_path(&self.proof_cache_directory, &proof_request);
         let path = Path::new(&proof_path_name);
 
         // write completed proof to file
@@ -196,10 +212,11 @@ mod tests {
 
     #[test]
     fn test_constructor() {
-        let proof_cache = ProofCache::new(0, "".into()).unwrap();
+        let test_client = ProofRequestCacheClient::new(0);
+        let proof_cache = ProofCache::new(0, "".into(), test_client.clone()).unwrap();
         assert_eq!(proof_cache.cache_list.len(), 0);
 
-        let proof_cache = ProofCache::new(10, "".into()).unwrap();
+        let proof_cache = ProofCache::new(10, "".into(), test_client.clone()).unwrap();
         assert_eq!(proof_cache.cache_list.len(), 10);
     }
 
@@ -219,21 +236,24 @@ mod tests {
 
     #[test]
     fn test_increment_current_cache_index_0() {
-        let mut proof_cache = ProofCache::new(0, "").unwrap();
+        let test_client = ProofRequestCacheClient::new(0);
+        let mut proof_cache = ProofCache::new(0, "", test_client).unwrap();
         proof_cache.increment_current_cache_index();
         assert_eq!(proof_cache.current_cache_index, 0);
     }
 
     #[test]
     fn test_increment_current_cache_index_1() {
-        let mut proof_cache = ProofCache::new(1, "").unwrap();
+        let test_client = ProofRequestCacheClient::new(0);
+        let mut proof_cache = ProofCache::new(1, "", test_client).unwrap();
         proof_cache.increment_current_cache_index();
         assert_eq!(proof_cache.current_cache_index, 0);
     }
 
     #[test]
     fn test_increment_current_cache_index_2() {
-        let mut proof_cache = ProofCache::new(2, "").unwrap();
+        let test_client = ProofRequestCacheClient::new(0);
+        let mut proof_cache = ProofCache::new(2, "", test_client).unwrap();
         proof_cache.increment_current_cache_index();
         assert_eq!(proof_cache.current_cache_index, 1);
         proof_cache.increment_current_cache_index();
@@ -244,7 +264,8 @@ mod tests {
 
     #[test]
     fn test_increment_current_cache_index_3() {
-        let mut proof_cache = ProofCache::new(3, "").unwrap();
+        let test_client = ProofRequestCacheClient::new(0);
+        let mut proof_cache = ProofCache::new(3, "", test_client).unwrap();
         proof_cache.increment_current_cache_index();
         assert_eq!(proof_cache.current_cache_index, 1);
         proof_cache.increment_current_cache_index();

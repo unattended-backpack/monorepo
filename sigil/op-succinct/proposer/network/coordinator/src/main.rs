@@ -10,8 +10,8 @@ use axum::{
 use log::{debug, error, info};
 use network_lib::{
     request_with_retries, AggProofRequest, AppError, GenericProofRequest, ProofCache,
-    ProofResponse, ProofStatus, SpanProofRequest, SuccinctProposerConfig, ValidateConfigRequest,
-    ValidateConfigResponse, WorkerInfo, WorkerRegistryClient,
+    ProofRequestCacheClient, ProofResponse, ProofStatus, SpanProofRequest, SuccinctProposerConfig,
+    ValidateConfigRequest, ValidateConfigResponse, WorkerInfo, WorkerRegistryClient,
 };
 use op_succinct_client_utils::{
     boot::{hash_rollup_config, BootInfoStruct},
@@ -116,13 +116,28 @@ async fn main() -> Result<()> {
         _ => 10,
     };
 
+    // set this really high.  We just don't want to run out of memory as this grows over time
+    let proof_request_cache_size: usize = match env::var("PROOF_REQUEST_CACHE_SIZE") {
+        Ok(size) => size
+            .parse()
+            .context("parse PROOF_REQUEST_CACHE_SIZE as usize")?,
+        _ => 100,
+    };
+
     let proof_cache_directory: String = match env::var("PROOF_CACHE_DIRECTORY") {
         Ok(dir) => dir,
         _ => format!("proofs"),
     };
 
+    let proof_request_cache_client = ProofRequestCacheClient::new(proof_request_cache_size);
+
     let proof_cache = Arc::new(RwLock::new(
-        ProofCache::new(proof_cache_size, &proof_cache_directory).context("Create proof cache")?,
+        ProofCache::new(
+            proof_cache_size,
+            &proof_cache_directory,
+            proof_request_cache_client.clone(),
+        )
+        .context("Create proof cache")?,
     ));
 
     let worker_registry_client =
@@ -145,6 +160,7 @@ async fn main() -> Result<()> {
         local_proving_only,
         proof_cache,
         worker_registry_client,
+        proof_request_cache_client,
     };
 
     let app = Router::new()
@@ -221,10 +237,11 @@ async fn request_span_proof(
 
     info!("Assigned id {proof_id} to span proof request {:?}", payload);
 
-    // get write copy of proof_cache
-    // record all span proof requests in the lookup
-    let mut proof_cache = state.proof_cache.write().await;
-    proof_cache.record_proof_request(&proof_id, &payload);
+    // record proof request in the lookup
+    state
+        .proof_request_cache_client
+        .record_proof_request(proof_id, payload.into())
+        .await?;
 
     Ok((
         StatusCode::OK,
@@ -241,7 +258,14 @@ async fn request_agg_proof(
 ) -> Result<(StatusCode, Json<ProofResponse>), AppError> {
     info!("Received agg proof request");
 
-    let proof_id = route_proof(&payload.into(), &state).await?;
+    let generic_payload: GenericProofRequest = payload.into();
+    let proof_id = route_proof(&generic_payload, &state).await?;
+
+    // record proof request in the lookup
+    state
+        .proof_request_cache_client
+        .record_proof_request(proof_id, generic_payload)
+        .await?;
 
     Ok((
         StatusCode::OK,
@@ -449,7 +473,11 @@ async fn get_proof_status(
 
     // first, check to see if it's a proof we have stored in the cache
     let proof_cache = state.proof_cache.read().await;
-    if let Some(proof_bytes) = proof_cache.read_proof(&proof_id).context("read proof")? {
+    if let Some(proof_bytes) = proof_cache
+        .read_proof(&proof_id)
+        .await
+        .context("read proof")?
+    {
         info!("Found proof {proof_id} on disk cache");
         return Ok((
             StatusCode::OK,
@@ -594,16 +622,12 @@ async fn write_proof_to_cache(
     proof_bytes: Vec<u8>,
     proof_id: &B256,
 ) -> Result<()> {
-    // We don't have this proof in the cache, write it if it's a span proof (we don't cache agg
-    // proofs)
     let mut proof_cache = state.proof_cache.write().await;
-    // We record all span proof requests via `proof_cache.record_proof_request`.  So if it's in
-    // the proof request mapping, it must be a span proof.  We only want to cache span proofs
-    if proof_cache.lookup_proof_request(proof_id).is_some() {
-        proof_cache
-            .write_proof(proof_bytes, proof_id)
-            .context("write locally constructed proof")?;
-    }
+
+    proof_cache
+        .write_proof(proof_bytes, proof_id)
+        .await
+        .context("write locally constructed proof")?;
 
     Ok(())
 }
