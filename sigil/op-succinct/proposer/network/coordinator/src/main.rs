@@ -465,12 +465,12 @@ async fn get_proof_status(
     // check worker_registry to see if we sent it to the local prover network.
     let start = Instant::now();
     let proof_status = state.worker_registry_client.proof_status(proof_id).await?;
-    info!(
-        "Took {} seconds to get proof status from worker",
-        start.elapsed().as_secs_f64()
-    );
+    let proof_status_lookup_time = start.elapsed().as_secs_f64();
+    info!("Took {proof_status_lookup_time} to get proof status from worker registry");
+
     // we got a proof status from the worker_registry
     if let Some(proof_status) = proof_status {
+        info!("Proof status {proof_status}");
         if proof_status.fulfillment_status == FulfillmentStatus::Fulfilled as i32 {
             info!("Found completed proof {proof_id} on worker network");
             write_proof_to_cache(&state, proof_status.proof.clone(), &proof_id)
@@ -485,7 +485,7 @@ async fn get_proof_status(
         // signal to worker_registry that this worker can be assigned new tasks
         Ok((StatusCode::OK, Json(proof_status)))
     }
-    // if we're useing the prover network
+    // if we're using the prover network
     else if !state.local_proving_only {
         let proof_status = get_proof_status_from_network(&state, proof_id).await?;
         if proof_status.fulfillment_status == FulfillmentStatus::Fulfilled as i32 {
@@ -494,9 +494,12 @@ async fn get_proof_status(
                 .await
                 .context("worker proof")?;
         }
+        info!("Found proof status {proof_status} in prover network");
         Ok((StatusCode::OK, Json(proof_status)))
     } else {
-        Ok((StatusCode::OK, Json(ProofStatus::lost())))
+        let lost_proof_status = ProofStatus::lost();
+        info!("Couldn't find proof status in worker registry, cache, or prover network.  Returning {lost_proof_status}");
+        Ok((StatusCode::OK, Json(lost_proof_status)))
     }
 }
 

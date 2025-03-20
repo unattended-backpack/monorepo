@@ -163,7 +163,7 @@ impl Display for ProofType {
     }
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, Debug)]
 /// The status of a proof request.
 pub struct ProofStatus {
     // Note: Can't use `FulfillmentStatus`/`ExecutionStatus` directly because `Serialize_repr` and `Deserialize_repr` aren't derived on it.
@@ -175,8 +175,8 @@ pub struct ProofStatus {
 impl ProofStatus {
     pub fn lost() -> Self {
         Self {
-            fulfillment_status: FulfillmentStatus::UnspecifiedFulfillmentStatus.into(),
-            execution_status: ExecutionStatus::UnspecifiedExecutionStatus.into(),
+            fulfillment_status: FulfillmentStatus::Unfulfillable.into(),
+            execution_status: ExecutionStatus::Unexecuted.into(),
             proof: vec![],
         }
     }
