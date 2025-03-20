@@ -11,7 +11,7 @@ use log::{debug, error, info};
 use network_lib::{
     request_with_retries, AggProofRequest, AppError, GenericProofRequest, ProofCache,
     ProofRequestCacheClient, ProofResponse, ProofStatus, SpanProofRequest, SuccinctProposerConfig,
-    ValidateConfigRequest, ValidateConfigResponse, WorkerInfo, WorkerRegistryClient,
+    ValidateConfigRequest, ValidateConfigResponse, WorkerInfo, WorkerRegistryClient, WorkerState,
 };
 use op_succinct_client_utils::{
     boot::{hash_rollup_config, BootInfoStruct},
@@ -171,6 +171,7 @@ async fn main() -> Result<()> {
         .route("/status/:proof_id", get(get_proof_status))
         .route("/validate_config", post(validate_config))
         .route("/worker_ready", post(worker_ready))
+        .route("/workers", get(workers))
         .layer(DefaultBodyLimit::disable())
         .layer(RequestBodyLimitLayer::new(102400 * 1024 * 1024))
         .with_state(global_hashes);
@@ -183,6 +184,18 @@ async fn main() -> Result<()> {
     info!("Server listening on {}", listener.local_addr().unwrap());
     axum::serve(listener, app).await?;
     Ok(())
+}
+
+async fn workers(
+    State(state): State<SuccinctProposerConfig>,
+) -> Result<(StatusCode, Json<Vec<(String, WorkerState)>>), AppError> {
+    let workers = state
+        .worker_registry_client
+        .workers()
+        .await
+        .map_err(|e| AppError(e))?;
+
+    Ok((StatusCode::OK, Json(workers)))
 }
 
 /// Validate the configuration of the L2 Output Oracle.

@@ -1,9 +1,9 @@
 use crate::{
-    request_with_retries, GenericProofRequest, ProofStatus, WorkerAggProofRequest,
+    request_with_retries, GenericProofRequest, ProofStatus, Serialize, WorkerAggProofRequest,
     WorkerSpanProofRequest,
 };
 use alloy_primitives::B256;
-use anyhow::Result;
+use anyhow::{anyhow, Result};
 use log::{debug, error, info, warn};
 use reqwest::Client;
 use std::{collections::HashMap, fmt::Display, time::Duration};
@@ -118,6 +118,15 @@ impl WorkerRegistryClient {
             .await
             .map_err(|e| anyhow::anyhow!("Failed to send command ProofComplete: {}", e))
     }
+
+    pub async fn workers(&self) -> Result<Vec<(String, WorkerState)>> {
+        let (resp_sender, receiver) = oneshot::channel();
+        self.sender
+            .send(WorkerRegistryCommand::Workers { resp_sender })
+            .await?;
+
+        receiver.await.map_err(|e| anyhow!(e))
+    }
 }
 
 pub struct WorkerRegistry {
@@ -158,6 +167,9 @@ impl WorkerRegistry {
                     resp_sender,
                 } => {
                     self.handle_proof_status(target_proof_id, resp_sender).await;
+                }
+                WorkerRegistryCommand::Workers { resp_sender } => {
+                    self.handle_workers(resp_sender);
                 }
             }
         }
@@ -448,6 +460,15 @@ impl WorkerRegistry {
             resp_sender.send(Some(Err(worker_addr.clone())));
         }
     }
+
+    fn handle_workers(&self, resp_sender: oneshot::Sender<Vec<(String, WorkerState)>>) {
+        let workers = self
+            .workers
+            .iter()
+            .map(|(x, y)| (x.clone(), y.clone()))
+            .collect();
+        resp_sender.send(workers);
+    }
 }
 
 pub enum WorkerRegistryCommand {
@@ -469,9 +490,12 @@ pub enum WorkerRegistryCommand {
     ProofComplete {
         proof_id: B256,
     },
+    Workers {
+        resp_sender: oneshot::Sender<Vec<(String, WorkerState)>>,
+    },
 }
 
-#[derive(Eq, PartialEq, Clone)]
+#[derive(Eq, PartialEq, Clone, Serialize)]
 pub struct WorkerState {
     status: WorkerStatus,
     strikes: usize,
@@ -533,7 +557,7 @@ impl Display for WorkerState {
     }
 }
 
-#[derive(Eq, PartialEq, Clone)]
+#[derive(Eq, PartialEq, Clone, Serialize)]
 pub enum WorkerStatus {
     Idle,
     Busy { proof_id: B256 },

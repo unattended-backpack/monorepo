@@ -10,7 +10,7 @@ use axum::{
 use log::{error, info};
 use network_lib::{
     AggProofRequest, AppError, GenericProofRequest, ProofStatus, ProofStore, ProofType,
-    SpanProofRequest, WorkerAggProofRequest, WorkerInfo, WorkerSpanProofRequest, WorkerState,
+    SpanProofRequest, WorkerAggProofRequest, WorkerConfig, WorkerInfo, WorkerSpanProofRequest,
 };
 use op_succinct_client_utils::boot::BootInfoStruct;
 use op_succinct_host_utils::{
@@ -55,7 +55,7 @@ async fn main() -> Result<()> {
 
     let this_worker_ip = env::var("THIS_WORKER_IP").context("Set THIS_WORKER_IP in .env")?;
 
-    let worker_state = WorkerState {
+    let worker_config = WorkerConfig {
         range_vk: Arc::new(range_vk),
         proof_store,
         cuda_prover,
@@ -67,7 +67,7 @@ async fn main() -> Result<()> {
         .route("/status/:proof_id", get(get_proof_status))
         .layer(DefaultBodyLimit::disable())
         .layer(RequestBodyLimitLayer::new(102400 * 1024 * 1024))
-        .with_state(worker_state);
+        .with_state(worker_config);
 
     let port = env::var("PORT").unwrap_or_else(|_| "3000".to_string());
     let listener = tokio::net::TcpListener::bind(format!("0.0.0.0:{}", port))
@@ -126,7 +126,7 @@ async fn main() -> Result<()> {
 }
 
 async fn request_span_proof(
-    State(state): State<WorkerState>,
+    State(state): State<WorkerConfig>,
     Json(payload): Json<WorkerSpanProofRequest>,
 ) -> Result<StatusCode, AppError> {
     info!(
@@ -158,7 +158,7 @@ async fn request_span_proof(
 }
 
 async fn request_agg_proof(
-    State(state): State<WorkerState>,
+    State(state): State<WorkerConfig>,
     Json(payload): Json<WorkerAggProofRequest>,
 ) -> Result<StatusCode, AppError> {
     info!("Received agg proof request with id {:?}", payload.proof_id);
@@ -189,7 +189,7 @@ async fn request_agg_proof(
 }
 
 async fn get_proof_status(
-    State(state): State<WorkerState>,
+    State(state): State<WorkerConfig>,
     Path(proof_id): Path<String>,
 ) -> Result<(StatusCode, Json<ProofStatus>), AppError> {
     let proof_id_bytes = hex::decode(&proof_id)?;

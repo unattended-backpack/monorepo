@@ -23,7 +23,7 @@ use sp1_sdk::{
 };
 use std::{collections::HashMap, fmt::Display, future::Future, sync::Arc};
 use tokio::sync::RwLock;
-pub use worker_registry::WorkerRegistryClient;
+pub use worker_registry::{WorkerRegistryClient, WorkerState};
 
 #[derive(Serialize, Deserialize, Debug)]
 pub struct ValidateConfigRequest {
@@ -249,7 +249,7 @@ pub struct SuccinctProposerConfig {
 pub type ProofStore = Arc<RwLock<HashMap<B256, ProofStatus>>>;
 
 #[derive(Clone)]
-pub struct WorkerState {
+pub struct WorkerConfig {
     pub range_vk: Arc<SP1VerifyingKey>,
     // pub range_pk: Arc<SP1ProvingKey>,
     // pub agg_pk: Arc<SP1ProvingKey>,
