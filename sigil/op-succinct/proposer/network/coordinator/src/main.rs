@@ -547,6 +547,9 @@ async fn get_proof_status(
     } else {
         // can't find proof anywhere.  Re-request it
         info!("Couldn't find proof status in worker registry, cache, or prover network.  Re-requesting proof {proof_id}");
+        // If we're already waiting for a worker to pick up this proof in the `handle_proof_request`
+        // cycle its okay because it'll eventually flush out when 1 worker gets assigned it because
+        // subsequent requests will short circuit return
         let proof_status = re_assign_lost_proof(&state, proof_id).await?;
 
         Ok((StatusCode::OK, Json(proof_status)))

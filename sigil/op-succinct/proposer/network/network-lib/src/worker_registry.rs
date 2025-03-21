@@ -6,10 +6,13 @@ use alloy_primitives::B256;
 use anyhow::{anyhow, Result};
 use log::{debug, error, info, warn};
 use reqwest::Client;
-use std::{collections::HashMap, fmt::Display, time::Duration};
+use std::{
+    collections::HashMap,
+    fmt::{self, Display},
+};
 use tokio::{
     sync::{mpsc, oneshot},
-    time::sleep,
+    time::{sleep, Instant},
 };
 
 #[derive(Clone)]
@@ -145,7 +148,9 @@ pub struct WorkerRegistry {
 impl WorkerRegistry {
     async fn background_event_loop(mut self) {
         while let Some(command) = self.receiver.recv().await {
-            debug!(
+            let start = Instant::now();
+            let command_string = format!("{:?}", command);
+            info!(
                 "{} messages in worker registry channel",
                 self.receiver.len()
             );
@@ -171,7 +176,13 @@ impl WorkerRegistry {
                 WorkerRegistryCommand::Workers { resp_sender } => {
                     self.handle_workers(resp_sender);
                 }
-            }
+            };
+
+            info!(
+                "Took {} seconds to process command {:?}",
+                start.elapsed().as_secs_f64(),
+                command_string
+            );
         }
     }
 
@@ -208,15 +219,6 @@ impl WorkerRegistry {
     async fn handle_assign_proof(&mut self, proof_id: B256, proof_request: &GenericProofRequest) {
         // remove any dead workers
         self.trim_workers();
-        let workers = self.workers.len();
-        if workers == 0 {
-            info!("0 workers found");
-            // sleep a little so it doesn't spam the terminal
-            sleep(Duration::from_secs(10)).await;
-        }
-        // else {
-        //     debug!("{workers} workers found");
-        // }
 
         // first check if there's already a worker working on this proof
         if let Some((worker_addr, _)) = self.workers.iter().find(|(_, worker_state)| {
@@ -315,16 +317,11 @@ impl WorkerRegistry {
         }
         // We iterated through all the workers and couldn't find an idle one who could
         // receive the request.
+        //
+        // This doesn't result in deadlock because the proposer will call `/status/proof_id`
+        // which will trigger another AssignProof request here
 
-        // Push the AssignProofRequest event to the end of the channel queue so we have
-        // a chance to process other events we received in the meantime (like freeing
-        // up a worker).
-        // TODO: handle result
-        let command = WorkerRegistryCommand::AssignProofRequest {
-            proof_id,
-            proof_request: proof_request.clone(),
-        };
-        self.self_command_sender.send(command).await;
+        warn!("No workers available for proof {proof_id}");
     }
 
     async fn handle_worker_ready(&mut self, worker_addr: String) {
@@ -495,7 +492,36 @@ pub enum WorkerRegistryCommand {
     },
 }
 
-#[derive(Eq, PartialEq, Clone, Serialize)]
+impl fmt::Debug for WorkerRegistryCommand {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let command = match self {
+            WorkerRegistryCommand::AssignProofRequest {
+                proof_id,
+                ref proof_request,
+            } => {
+                format!("AssignProofRequest")
+            }
+            WorkerRegistryCommand::WorkerReady { worker_addr } => {
+                format!("WorkerReady")
+            }
+            WorkerRegistryCommand::ProofComplete { proof_id } => {
+                format!("ProofComplete")
+            }
+            WorkerRegistryCommand::ProofStatus {
+                target_proof_id,
+                resp_sender,
+            } => {
+                format!("ProofStatus")
+            }
+            WorkerRegistryCommand::Workers { resp_sender } => {
+                format!("Workers")
+            }
+        };
+        write!(f, "{command}")
+    }
+}
+
+#[derive(Eq, PartialEq, Clone, Debug, Serialize)]
 pub struct WorkerState {
     status: WorkerStatus,
     strikes: usize,
@@ -557,7 +583,7 @@ impl Display for WorkerState {
     }
 }
 
-#[derive(Eq, PartialEq, Clone, Serialize)]
+#[derive(Eq, PartialEq, Debug, Clone, Serialize)]
 pub enum WorkerStatus {
     Idle,
     Busy { proof_id: B256 },

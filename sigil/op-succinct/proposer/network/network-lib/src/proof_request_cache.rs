@@ -1,5 +1,5 @@
 use anyhow::{anyhow, Context, Result};
-use log::error;
+use log::{error, info};
 use std::collections::HashMap;
 
 use crate::GenericProofRequest;
@@ -23,7 +23,7 @@ impl ProofRequestCacheClient {
 
         let proof_request_cache = ProofRequestCache {
             cache_size: max_proof_requests_stored,
-            cache_list: vec![],
+            cache_list,
             current_cache_index: 0,
             proof_requests: HashMap::new(),
             receiver,
@@ -56,7 +56,7 @@ impl ProofRequestCacheClient {
         let (response_sender, receiver) = oneshot::channel();
         self.sender
             .send(ProofRequestCacheCommand::LookupProof {
-                proof_id: proof_id.clone(),
+                proof_id: *proof_id,
                 response_sender,
             })
             .await?;
