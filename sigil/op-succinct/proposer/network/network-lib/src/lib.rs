@@ -55,6 +55,7 @@ impl Display for SpanProofRequest {
 
 #[derive(Deserialize, Serialize, Debug, Default, Clone, Copy)]
 pub struct WorkerSpanProofRequest {
+    pub mock_mode: bool,
     pub proof_id: B256,
     pub start: u64,
     pub end: u64,
@@ -71,6 +72,7 @@ pub struct AggProofRequest {
 // TODO: remove Clone from this.  It's big
 #[derive(Deserialize, Serialize, Debug, Clone)]
 pub struct WorkerAggProofRequest {
+    pub mock_mode: bool,
     pub proof_id: B256,
     #[serde(deserialize_with = "deserialize_base64_vec")]
     pub subproofs: Vec<Vec<u8>>,
@@ -78,14 +80,15 @@ pub struct WorkerAggProofRequest {
 }
 
 impl WorkerAggProofRequest {
-    pub fn split_to_generic(self) -> (B256, GenericProofRequest) {
+    pub fn split_to_generic(self) -> (bool, B256, GenericProofRequest) {
+        let mock_mode = self.mock_mode;
         let proof_id = self.proof_id;
         let agg_request = AggProofRequest {
             subproofs: self.subproofs,
             head: self.head,
         };
 
-        (proof_id, GenericProofRequest::Agg(agg_request))
+        (mock_mode, proof_id, GenericProofRequest::Agg(agg_request))
     }
 }
 
@@ -244,6 +247,7 @@ pub struct SuccinctProposerConfig {
     pub proof_cache: ProofCacheWrapper,
     pub worker_registry_client: WorkerRegistryClient,
     pub proof_request_cache_client: ProofRequestCacheClient,
+    pub mock_mode: bool,
 }
 
 pub type ProofStore = Arc<RwLock<HashMap<B256, ProofStatus>>>;
@@ -251,15 +255,15 @@ pub type ProofStore = Arc<RwLock<HashMap<B256, ProofStatus>>>;
 #[derive(Clone)]
 pub struct WorkerConfig {
     pub range_vk: Arc<SP1VerifyingKey>,
-    // pub range_pk: Arc<SP1ProvingKey>,
-    // pub agg_pk: Arc<SP1ProvingKey>,
+    pub range_pk: Arc<SP1ProvingKey>,
+    pub agg_pk: Arc<SP1ProvingKey>,
     // pub agg_vk: Arc<SP1VerifyingKey>,
     // pub agg_vkey_hash: B256,
     // pub range_vkey_commitment: B256,
     // pub rollup_config_hash: B256,
     // pub range_proof_strategy: FulfillmentStrategy,
     // pub agg_proof_strategy: FulfillmentStrategy,
-    // pub agg_proof_mode: SP1ProofMode,
+    pub agg_proof_mode: SP1ProofMode,
     pub proof_store: ProofStore,
     pub cuda_prover: Arc<CudaProver>,
 }

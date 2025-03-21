@@ -88,6 +88,12 @@ async fn main() -> Result<()> {
         _ => false,
     };
 
+    // defaults to false, but can be set to true to only make mock requests to a worker
+    let mock_mode = match env::var("MOCK_MODE") {
+        Ok(on) if on.to_lowercase() == "true" => true,
+        _ => false,
+    };
+
     // retries for requests to internal and external prover networks
     let prover_network_retries: usize = match env::var("PROVER_NETWORK_RETRIES") {
         Ok(retries) => retries
@@ -161,6 +167,7 @@ async fn main() -> Result<()> {
         proof_cache,
         worker_registry_client,
         proof_request_cache_client,
+        mock_mode,
     };
 
     let app = Router::new()
@@ -588,7 +595,7 @@ async fn route_proof(
         let proof_id = B256::random();
         state
             .worker_registry_client
-            .assign_proof_request(proof_id, proof_request.clone())
+            .assign_proof_request(proof_id, proof_request.clone(), state.mock_mode)
             .await?;
         Ok(proof_id)
     } else {
@@ -634,7 +641,7 @@ async fn route_proof(
                 let proof_id = B256::random();
                 state
                     .worker_registry_client
-                    .assign_proof_request(proof_id, proof_request.clone())
+                    .assign_proof_request(proof_id, proof_request.clone(), state.mock_mode)
                     .await?;
                 Ok(proof_id)
             }
@@ -894,7 +901,7 @@ async fn re_assign_lost_proof(
 
     state
         .worker_registry_client
-        .assign_proof_request(proof_id, proof_request.clone())
+        .assign_proof_request(proof_id, proof_request.clone(), state.mock_mode)
         .await?;
 
     Ok(ProofStatus {

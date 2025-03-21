@@ -58,11 +58,13 @@ impl WorkerRegistryClient {
         &self,
         proof_id: B256,
         proof_request: GenericProofRequest,
+        mock_mode: bool,
     ) -> Result<()> {
         self.sender
             .send(WorkerRegistryCommand::AssignProofRequest {
                 proof_id,
                 proof_request,
+                mock_mode,
             })
             .await
             .map_err(|e| anyhow::anyhow!("Failed to send command AssignProofRequest: {}", e))
@@ -158,8 +160,10 @@ impl WorkerRegistry {
                 WorkerRegistryCommand::AssignProofRequest {
                     proof_id,
                     ref proof_request,
+                    mock_mode,
                 } => {
-                    self.handle_assign_proof(proof_id, proof_request).await;
+                    self.handle_assign_proof(mock_mode, proof_id, proof_request)
+                        .await;
                 }
                 WorkerRegistryCommand::WorkerReady { worker_addr } => {
                     self.handle_worker_ready(worker_addr).await;
@@ -216,7 +220,12 @@ impl WorkerRegistry {
         }
     }
 
-    async fn handle_assign_proof(&mut self, proof_id: B256, proof_request: &GenericProofRequest) {
+    async fn handle_assign_proof(
+        &mut self,
+        mock_mode: bool,
+        proof_id: B256,
+        proof_request: &GenericProofRequest,
+    ) {
         // remove any dead workers
         self.trim_workers();
 
@@ -253,6 +262,7 @@ impl WorkerRegistry {
             let worker_response = match &proof_request {
                 GenericProofRequest::Agg(agg_proof_request) => {
                     let worker_agg_proof_request = WorkerAggProofRequest {
+                        mock_mode,
                         proof_id,
                         // TODO: this is an expensive clone
                         subproofs: agg_proof_request.subproofs.clone(),
@@ -266,6 +276,7 @@ impl WorkerRegistry {
                 }
                 GenericProofRequest::Span(span_proof_request) => {
                     let worker_span_proof_request = WorkerSpanProofRequest {
+                        mock_mode,
                         proof_id,
                         start: span_proof_request.start,
                         end: span_proof_request.end,
@@ -472,6 +483,7 @@ pub enum WorkerRegistryCommand {
     AssignProofRequest {
         proof_id: B256,
         proof_request: GenericProofRequest,
+        mock_mode: bool,
     },
     WorkerReady {
         worker_addr: String,
@@ -498,6 +510,7 @@ impl fmt::Debug for WorkerRegistryCommand {
             WorkerRegistryCommand::AssignProofRequest {
                 proof_id,
                 ref proof_request,
+                mock_mode,
             } => {
                 format!("AssignProofRequest")
             }

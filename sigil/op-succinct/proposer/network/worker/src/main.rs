@@ -20,8 +20,8 @@ use op_succinct_host_utils::{
 use reqwest::Client;
 use sp1_sdk::{
     network::proto::network::{ExecutionStatus, FulfillmentStatus},
-    utils, CudaProver, Prover, ProverClient, SP1Proof, SP1ProofWithPublicValues, SP1Stdin,
-    SP1VerifyingKey,
+    utils, CudaProver, Prover, ProverClient, SP1Proof, SP1ProofMode, SP1ProofWithPublicValues,
+    SP1ProvingKey, SP1Stdin, SP1VerifyingKey, SP1_CIRCUIT_VERSION,
 };
 use std::{collections::HashMap, env, sync::Arc};
 use tokio::{
@@ -45,18 +45,27 @@ async fn main() -> Result<()> {
     dotenv::dotenv().ok();
 
     let cuda_prover = Arc::new(ProverClient::builder().cuda().build());
-    let (_range_pk, range_vk) = cuda_prover.setup(RANGE_ELF);
-    let (_agg_pk, _agg_vk) = cuda_prover.setup(AGG_ELF);
+    let (range_pk, range_vk) = cuda_prover.setup(RANGE_ELF);
+    let (agg_pk, _agg_vk) = cuda_prover.setup(AGG_ELF);
 
     let proof_store = Arc::new(RwLock::new(HashMap::new()));
 
     let coordinator_address =
         env::var("COORDINATOR_ADDRESS").context("Set COORDINATOR_ADDRESS in .env")?;
 
+    // Set the aggregation proof type based on environment variable. Default to groth16.
+    let agg_proof_mode = match env::var("AGG_PROOF_MODE") {
+        Ok(proof_type) if proof_type.to_lowercase() == "plonk" => SP1ProofMode::Plonk,
+        _ => SP1ProofMode::Groth16,
+    };
+
     let this_worker_ip = env::var("THIS_WORKER_IP").context("Set THIS_WORKER_IP in .env")?;
 
     let worker_config = WorkerConfig {
         range_vk: Arc::new(range_vk),
+        range_pk: Arc::new(range_pk),
+        agg_pk: Arc::new(agg_pk),
+        agg_proof_mode,
         proof_store,
         cuda_prover,
     };
@@ -146,11 +155,10 @@ async fn request_span_proof(
         .insert(payload.proof_id, initial_status);
 
     locally_prove(
+        state.clone(),
+        payload.mock_mode,
         payload.proof_id,
         payload.into(),
-        state.proof_store.clone(),
-        state.cuda_prover.clone(),
-        state.range_vk.clone(),
     )
     .await?;
 
@@ -175,15 +183,8 @@ async fn request_agg_proof(
         .await
         .insert(payload.proof_id, initial_status);
 
-    let (proof_id, generic_proof_request) = payload.split_to_generic();
-    locally_prove(
-        proof_id,
-        generic_proof_request,
-        state.proof_store.clone(),
-        state.cuda_prover.clone(),
-        state.range_vk.clone(),
-    )
-    .await?;
+    let (mock_mode, proof_id, generic_proof_request) = payload.split_to_generic();
+    locally_prove(state.clone(), mock_mode, proof_id, generic_proof_request).await?;
 
     Ok(StatusCode::OK)
 }
@@ -228,56 +229,82 @@ async fn get_proof_status(
 // runs proof in a background thread.  Only needs to be async because of
 // proof_store.write().await
 async fn locally_prove(
+    state: WorkerConfig,
+    mock_mode: bool,
     proof_id: B256,
     proof_request: GenericProofRequest,
-    proof_store: ProofStore,
-    cuda_prover: Arc<CudaProver>,
-    range_vk: Arc<SP1VerifyingKey>,
 ) -> Result<(), AppError> {
     tokio::spawn(async move {
         let start_time = tokio::time::Instant::now();
 
         let (proof_type, proof_res) = match proof_request {
             GenericProofRequest::Span(proof_request) => {
-                let sp1_stdin = match generate_span_stdin(&proof_request).await {
-                    Ok(stdin) => stdin,
-                    Err(e) => {
-                        error!("Span proof setup error: {}", e);
-                        // TODO: will this propagate the error?
-                        return;
+                match mock_mode {
+                    true => {
+                        info!("computing mock span proof with id {:?}", proof_id);
+                        let proof = mock_span_proof(proof_request, &state.range_pk).await;
+                        ("mock span", proof)
                     }
-                };
-                info!("computing span proof with id {:?}", proof_id);
-                // the cuda prover keeps state of the last `setup()` that was called on it.
-                // You must call `setup()` then `prove` *each* time you intend to
-                // prove a certain program
-                let (proving_key, _) = cuda_prover.setup(RANGE_ELF);
-                (
-                    "span",
-                    cuda_prover
-                        .prove(&proving_key, &sp1_stdin)
-                        .compressed()
-                        .run(),
-                )
+                    false => {
+                        let sp1_stdin = match generate_span_stdin(&proof_request).await {
+                            Ok(stdin) => stdin,
+                            Err(e) => {
+                                error!("Span proof setup error: {}", e);
+                                // TODO: will this propagate the error?
+                                return;
+                            }
+                        };
+                        info!("computing span proof with id {:?}", proof_id);
+                        // the cuda prover keeps state of the last `setup()` that was called on it.
+                        // You must call `setup()` then `prove` *each* time you intend to
+                        // prove a certain program
+                        let (proving_key, _) = state.cuda_prover.setup(RANGE_ELF);
+                        let proof = state
+                            .cuda_prover
+                            .prove(&proving_key, &sp1_stdin)
+                            .compressed()
+                            .run();
+                        ("span", proof)
+                    }
+                }
             }
             GenericProofRequest::Agg(proof_request) => {
-                let sp1_stdin = match generate_agg_stdin(range_vk, proof_request).await {
-                    Ok(stdin) => stdin,
-                    Err(e) => {
-                        error!("Agg proof setup error: {}", e);
-                        // TODO: will this propagate the error?
-                        return;
+                match mock_mode {
+                    true => {
+                        info!("computing mock agg proof with id {:?}", proof_id);
+                        let proof = mock_agg_proof(
+                            proof_request,
+                            &state.range_vk,
+                            &state.agg_pk,
+                            state.agg_proof_mode,
+                        )
+                        .await;
+                        ("mock agg", proof)
                     }
-                };
-                info!("computing agg proof with id {:?}", proof_id);
-                // the cuda prover keeps state of the last `setup()` that was called on it.
-                // You must call `setup()` then `prove` *each* time you intend to
-                // prove a certain program
-                let (proving_key, _) = cuda_prover.setup(AGG_ELF);
-                (
-                    "agg",
-                    cuda_prover.prove(&proving_key, &sp1_stdin).groth16().run(),
-                )
+                    false => {
+                        let sp1_stdin =
+                            match generate_agg_stdin(state.range_vk, proof_request).await {
+                                Ok(stdin) => stdin,
+                                Err(e) => {
+                                    error!("Agg proof setup error: {}", e);
+                                    // TODO: will this propagate the error?
+                                    return;
+                                }
+                            };
+                        info!("computing agg proof with id {:?}", proof_id);
+                        // the cuda prover keeps state of the last `setup()` that was called on it.
+                        // You must call `setup()` then `prove` *each* time you intend to
+                        // prove a certain program
+                        let (proving_key, _) = state.cuda_prover.setup(AGG_ELF);
+                        let proof = state
+                            .cuda_prover
+                            .prove(&proving_key, &sp1_stdin)
+                            .groth16()
+                            .run();
+
+                        ("agg", proof)
+                    }
+                }
             }
         };
 
@@ -341,7 +368,11 @@ async fn locally_prove(
         info!("Time to complete {proof_type} proof: {} minutes", minutes);
 
         // update proof store
-        proof_store.write().await.insert(proof_id, proof_status);
+        state
+            .proof_store
+            .write()
+            .await
+            .insert(proof_id, proof_status);
     });
 
     Ok(())
@@ -466,4 +497,137 @@ async fn generate_span_stdin(payload: &SpanProofRequest) -> Result<SP1Stdin> {
     };
 
     Ok(sp1_stdin)
+}
+
+async fn mock_agg_proof(
+    payload: AggProofRequest,
+    range_vk: &SP1VerifyingKey,
+    agg_pk: &SP1ProvingKey,
+    agg_proof_mode: SP1ProofMode,
+) -> Result<SP1ProofWithPublicValues> {
+    let mut proofs_with_pv: Vec<SP1ProofWithPublicValues> = payload
+        .subproofs
+        .iter()
+        .map(|sp| bincode::deserialize(sp).unwrap())
+        .collect();
+
+    let boot_infos: Vec<BootInfoStruct> = proofs_with_pv
+        .iter_mut()
+        .map(|proof| proof.public_values.read())
+        .collect();
+
+    let proofs: Vec<SP1Proof> = proofs_with_pv
+        .iter_mut()
+        .map(|proof| proof.proof.clone())
+        .collect();
+
+    let l1_head_bytes = match hex::decode(
+        payload
+            .head
+            .strip_prefix("0x")
+            .expect("Invalid L1 head, no 0x prefix."),
+    ) {
+        Ok(bytes) => bytes,
+        Err(e) => {
+            error!("Failed to decode L1 head: {}", e);
+            return Err(anyhow::anyhow!("Failed to decode L1 head: {}", e));
+        }
+    };
+    let l1_head: [u8; 32] = l1_head_bytes.try_into().unwrap();
+
+    let fetcher = match OPSuccinctDataFetcher::new_with_rollup_config(RunContext::Docker).await {
+        Ok(f) => f,
+        Err(e) => {
+            error!("Failed to create data fetcher: {}", e);
+            return Err(e);
+        }
+    };
+    let headers = match fetcher
+        .get_header_preimages(&boot_infos, l1_head.into())
+        .await
+    {
+        Ok(h) => h,
+        Err(e) => {
+            error!("Failed to get header preimages: {}", e);
+            return Err(e);
+        }
+    };
+
+    let stdin = match get_agg_proof_stdin(proofs, boot_infos, headers, range_vk, l1_head.into()) {
+        Ok(s) => s,
+        Err(e) => {
+            error!("Failed to get aggregation proof stdin: {}", e);
+            return Err(e);
+        }
+    };
+
+    // Note(ratan): In a future version of the server which only supports mock proofs, Arc<MockProver> should be used to reduce memory usage.
+    let prover = ProverClient::builder().mock().build();
+    let proof = match prover
+        .prove(agg_pk, &stdin)
+        .mode(agg_proof_mode)
+        .deferred_proof_verification(false)
+        .run()
+    {
+        Ok(p) => p,
+        Err(e) => {
+            error!("Failed to generate proof: {}", e);
+            return Err(e);
+        }
+    };
+
+    Ok(proof)
+}
+
+async fn mock_span_proof(
+    payload: SpanProofRequest,
+    range_pk: &SP1ProvingKey,
+) -> Result<SP1ProofWithPublicValues> {
+    let fetcher = match OPSuccinctDataFetcher::new_with_rollup_config(RunContext::Docker).await {
+        Ok(f) => f,
+        Err(e) => {
+            error!("Failed to create data fetcher: {}", e);
+            return Err(e);
+        }
+    };
+
+    let host_args = match fetcher
+        .get_host_args(
+            payload.start,
+            payload.end,
+            None,
+            ProgramType::Multi,
+            CacheMode::DeleteCache,
+        )
+        .await
+    {
+        Ok(cli) => cli,
+        Err(e) => {
+            error!("Failed to get host CLI args: {}", e);
+            return Err(e);
+        }
+    };
+
+    let oracle = start_server_and_native_client(host_args.clone()).await?;
+
+    let sp1_stdin = match get_proof_stdin(oracle) {
+        Ok(stdin) => stdin,
+        Err(e) => {
+            error!("Failed to get proof stdin: {}", e);
+            return Err(e);
+        }
+    };
+
+    // Note(ratan): In a future version of the server which only supports mock proofs, Arc<MockProver> should be used to reduce memory usage.
+    let prover = ProverClient::builder().mock().build();
+    let (pv, _) = prover.execute(RANGE_ELF, &sp1_stdin).run().unwrap();
+
+    let proof = SP1ProofWithPublicValues::create_mock_proof(
+        range_pk,
+        pv.clone(),
+        SP1ProofMode::Compressed,
+        SP1_CIRCUIT_VERSION,
+    );
+
+    Ok(proof)
 }
