@@ -19,7 +19,7 @@ use sp1_sdk::{
         proto::network::{ExecutionStatus, FulfillmentStatus},
         FulfillmentStrategy,
     },
-    CudaProver, NetworkProver, SP1ProofMode, SP1ProvingKey, SP1VerifyingKey,
+    EnvProver, NetworkProver, SP1ProofMode, SP1ProvingKey, SP1VerifyingKey,
 };
 use std::{collections::HashMap, fmt::Display, future::Future, sync::Arc};
 use tokio::sync::RwLock;
@@ -265,7 +265,7 @@ pub struct WorkerConfig {
     // pub agg_proof_strategy: FulfillmentStrategy,
     pub agg_proof_mode: SP1ProofMode,
     pub proof_store: ProofStore,
-    pub cuda_prover: Arc<CudaProver>,
+    pub prover: Arc<EnvProver>,
 }
 
 #[derive(Clone, Serialize, Deserialize)]

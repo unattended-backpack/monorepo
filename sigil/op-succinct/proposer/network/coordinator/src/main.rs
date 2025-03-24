@@ -514,7 +514,7 @@ async fn get_proof_status(
     let start = Instant::now();
     let proof_status = state.worker_registry_client.proof_status(proof_id).await?;
     let proof_status_lookup_time = start.elapsed().as_secs_f64();
-    info!("Took {proof_status_lookup_time} to get proof status from worker registry");
+    debug!("Took {proof_status_lookup_time} seconds to get proof status from worker registry");
 
     // we got a proof status from the worker_registry
     if let Some(proof_status) = proof_status {

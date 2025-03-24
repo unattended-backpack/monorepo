@@ -4,7 +4,7 @@ use crate::{
 };
 use alloy_primitives::B256;
 use anyhow::{anyhow, Result};
-use log::{debug, error, info, warn};
+use log::{debug, error, info, trace, warn};
 use reqwest::Client;
 use std::{
     collections::HashMap,
@@ -152,7 +152,7 @@ impl WorkerRegistry {
         while let Some(command) = self.receiver.recv().await {
             let start = Instant::now();
             let command_string = format!("{:?}", command);
-            info!(
+            trace!(
                 "{} messages in worker registry channel",
                 self.receiver.len()
             );

@@ -44,9 +44,10 @@ async fn main() -> Result<()> {
     utils::setup_logger();
     dotenv::dotenv().ok();
 
-    let cuda_prover = Arc::new(ProverClient::builder().cuda().build());
-    let (range_pk, range_vk) = cuda_prover.setup(RANGE_ELF);
-    let (agg_pk, _agg_vk) = cuda_prover.setup(AGG_ELF);
+    //let cuda_prover = Arc::new(ProverClient::builder().cuda().build());
+    let prover = Arc::new(ProverClient::from_env());
+    let (range_pk, range_vk) = prover.setup(RANGE_ELF);
+    let (agg_pk, _agg_vk) = prover.setup(AGG_ELF);
 
     let proof_store = Arc::new(RwLock::new(HashMap::new()));
 
@@ -67,7 +68,7 @@ async fn main() -> Result<()> {
         agg_pk: Arc::new(agg_pk),
         agg_proof_mode,
         proof_store,
-        cuda_prover,
+        prover,
     };
 
     let app = Router::new()
@@ -258,9 +259,9 @@ async fn locally_prove(
                         // the cuda prover keeps state of the last `setup()` that was called on it.
                         // You must call `setup()` then `prove` *each* time you intend to
                         // prove a certain program
-                        let (proving_key, _) = state.cuda_prover.setup(RANGE_ELF);
+                        let (proving_key, _) = state.prover.setup(RANGE_ELF);
                         let proof = state
-                            .cuda_prover
+                            .prover
                             .prove(&proving_key, &sp1_stdin)
                             .compressed()
                             .run();
@@ -295,12 +296,8 @@ async fn locally_prove(
                         // the cuda prover keeps state of the last `setup()` that was called on it.
                         // You must call `setup()` then `prove` *each* time you intend to
                         // prove a certain program
-                        let (proving_key, _) = state.cuda_prover.setup(AGG_ELF);
-                        let proof = state
-                            .cuda_prover
-                            .prove(&proving_key, &sp1_stdin)
-                            .groth16()
-                            .run();
+                        let (proving_key, _) = state.prover.setup(AGG_ELF);
+                        let proof = state.prover.prove(&proving_key, &sp1_stdin).groth16().run();
 
                         ("agg", proof)
                     }
