@@ -168,9 +168,11 @@ async fn request_span_proof(
 
 async fn request_agg_proof(
     State(state): State<WorkerConfig>,
-    Json(payload): Json<WorkerAggProofRequest>,
+    Json(payload): Json<AggProofRequest>,
 ) -> Result<StatusCode, AppError> {
-    info!("Received agg proof request with id {:?}", payload.proof_id);
+    // TODO: fix
+    let proof_id = B256::random();
+    info!("Received agg proof request with id {:?}", proof_id);
 
     let initial_status = ProofStatus {
         fulfillment_status: FulfillmentStatus::Assigned.into(),
@@ -182,9 +184,11 @@ async fn request_agg_proof(
         .proof_store
         .write()
         .await
-        .insert(payload.proof_id, initial_status);
+        .insert(proof_id, initial_status);
 
-    let (mock_mode, proof_id, generic_proof_request) = payload.split_to_generic();
+    //let (mock_mode, proof_id, generic_proof_request) = payload.split_to_generic();
+    let generic_proof_request = GenericProofRequest::Agg(payload);
+    let mock_mode = false;
     locally_prove(state.clone(), mock_mode, proof_id, generic_proof_request).await?;
 
     Ok(StatusCode::OK)
