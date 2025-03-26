@@ -262,16 +262,16 @@ impl WorkerRegistry {
             // TODO: this blocks up things for AWHILE (entire time witnessgen is going on)
             let worker_response = match &proof_request {
                 GenericProofRequest::Agg(agg_proof_request) => {
-                    // let worker_agg_proof_request = WorkerAggProofRequest {
-                    //     mock_mode,
-                    //     proof_id,
-                    //     // TODO: this is an expensive clone
-                    //     subproofs: agg_proof_request.subproofs.clone(),
-                    //     head: agg_proof_request.head.clone(),
-                    // };
+                    let worker_agg_proof_request = WorkerAggProofRequest {
+                        mock_mode,
+                        proof_id,
+                        // TODO: this is an expensive clone
+                        subproofs: agg_proof_request.subproofs.clone(),
+                        head: agg_proof_request.head.clone(),
+                    };
                     self.reqwest_client
                         .post(format!("{}/request_agg_proof", worker_addr))
-                        .json(&agg_proof_request)
+                        .json(&worker_agg_proof_request)
                         .send()
                         .await
                 }

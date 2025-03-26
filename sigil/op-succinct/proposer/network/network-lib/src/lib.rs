@@ -74,7 +74,6 @@ pub struct AggProofRequest {
 pub struct WorkerAggProofRequest {
     pub mock_mode: bool,
     pub proof_id: B256,
-    #[serde(deserialize_with = "deserialize_base64_vec")]
     pub subproofs: Vec<Vec<u8>>,
     pub head: String,
 }
