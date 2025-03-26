@@ -258,6 +258,7 @@ impl WorkerRegistry {
                 continue;
             }
 
+            info!("Attemping to assign proof {proof_id} to worker {worker_addr}");
             // TODO: this blocks up things for AWHILE (entire time witnessgen is going on)
             let worker_response = match &proof_request {
                 GenericProofRequest::Agg(agg_proof_request) => {
