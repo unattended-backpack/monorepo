@@ -247,6 +247,7 @@ async fn locally_prove(
                         ("mock span", proof)
                     }
                     false => {
+                        info!("Generating stdin for span proof {}", proof_id);
                         let sp1_stdin = match generate_span_stdin(&proof_request).await {
                             Ok(stdin) => stdin,
                             Err(e) => {
@@ -255,7 +256,7 @@ async fn locally_prove(
                                 return;
                             }
                         };
-                        info!("computing span proof with id {:?}", proof_id);
+                        info!("computing span proof {}", proof_id);
                         // the cuda prover keeps state of the last `setup()` that was called on it.
                         // You must call `setup()` then `prove` *each* time you intend to
                         // prove a certain program
@@ -283,6 +284,7 @@ async fn locally_prove(
                         ("mock agg", proof)
                     }
                     false => {
+                        info!("Generating stdin for agg proof {}", proof_id);
                         let sp1_stdin =
                             match generate_agg_stdin(state.range_vk, proof_request).await {
                                 Ok(stdin) => stdin,
@@ -292,7 +294,7 @@ async fn locally_prove(
                                     return;
                                 }
                             };
-                        info!("computing agg proof with id {:?}", proof_id);
+                        info!("computing agg proof {}", proof_id);
                         // the cuda prover keeps state of the last `setup()` that was called on it.
                         // You must call `setup()` then `prove` *each* time you intend to
                         // prove a certain program

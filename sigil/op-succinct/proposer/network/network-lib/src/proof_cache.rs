@@ -110,7 +110,7 @@ impl ProofCache {
                 }
             }
             Some(GenericProofRequest::Agg(_)) => {
-                info!("Proof id {proof_id} is a agg proof.  Not returning from proof_cache because we never save agg proofs");
+                // we never save agg proofs to the cache, skip
                 Ok(None)
             }
             // we haven't received this proof request yet, it's not in the proof_request_lookup

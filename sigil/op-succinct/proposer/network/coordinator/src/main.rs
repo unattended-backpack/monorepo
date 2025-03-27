@@ -518,8 +518,6 @@ async fn get_proof_status(
 
     // we got a proof status from the worker_registry
     if let Some(proof_status) = proof_status {
-        info!("Proof status {proof_status}");
-
         // if the proof was lost by the worker network we have to re-request it
         if proof_status.is_lost() {
             let proof_status = re_assign_lost_proof(&state, proof_id).await?;
