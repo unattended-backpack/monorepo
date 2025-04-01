@@ -1,0 +1,910 @@
+use alloy_primitives::{hex, Address, B256};
+
+use anyhow::{anyhow, Context, Result};
+use axum::{
+    extract::{DefaultBodyLimit, Path, State},
+    http::StatusCode,
+    routing::{get, post},
+    Json, Router,
+};
+use log::{debug, error, info};
+use network_lib::{
+    request_with_retries, AggProofRequest, AppError, GenericProofRequest, ProofCache,
+    ProofRequestCacheClient, ProofResponse, ProofStatus, SpanProofRequest, SuccinctProposerConfig,
+    ValidateConfigRequest, ValidateConfigResponse, WorkerInfo, WorkerRegistryClient, WorkerState,
+};
+use op_succinct_client_utils::{
+    boot::{hash_rollup_config, BootInfoStruct},
+    types::u32_to_u8,
+};
+use op_succinct_host_utils::{
+    fetcher::{CacheMode, OPSuccinctDataFetcher, RunContext},
+    get_agg_proof_stdin, get_proof_stdin, start_server_and_native_client,
+    stats::ExecutionStats,
+    L2OutputOracle, ProgramType,
+};
+use sp1_sdk::{
+    network::{
+        proto::network::{ExecutionStatus, FulfillmentStatus},
+        FulfillmentStrategy,
+    },
+    utils, HashableKey, Prover, ProverClient, SP1Proof, SP1ProofMode, SP1ProofWithPublicValues,
+    SP1Stdin, SP1VerifyingKey, SP1_CIRCUIT_VERSION,
+};
+use std::{
+    env, fs,
+    str::FromStr,
+    sync::Arc,
+    time::{Instant, SystemTime, UNIX_EPOCH},
+};
+use tokio::sync::RwLock;
+use tower_http::limit::RequestBodyLimitLayer;
+
+pub const RANGE_ELF: &[u8] = include_bytes!("../../../../elf/range-elf");
+pub const AGG_ELF: &[u8] = include_bytes!("../../../../elf/aggregation-elf");
+
+#[tokio::main]
+async fn main() -> Result<()> {
+    // Enable logging.
+    env::set_var("RUST_LOG", "info");
+
+    // Set up the SP1 SDK logger.
+    utils::setup_logger();
+    dotenv::dotenv().ok();
+
+    // network prover setup
+    let network_prover = Arc::new(ProverClient::builder().network().build());
+    let (range_pk, range_vk) = network_prover.setup(RANGE_ELF);
+    let (agg_pk, agg_vk) = network_prover.setup(AGG_ELF);
+    let multi_block_vkey_u8 = u32_to_u8(range_vk.vk.hash_u32());
+    let range_vkey_commitment = B256::from(multi_block_vkey_u8);
+    let agg_vkey_hash = B256::from_str(&agg_vk.bytes32()).unwrap();
+
+    let fetcher = OPSuccinctDataFetcher::new_with_rollup_config(RunContext::Docker).await?;
+    // Note: The rollup config hash never changes for a given chain, so we can just hash it once at
+    // server start-up. The only time a rollup config changes is typically when a new version of the
+    // [`RollupConfig`] is released from `op-alloy`.
+    let rollup_config_hash = hash_rollup_config(fetcher.rollup_config.as_ref().unwrap());
+
+    // Set the proof strategies based on environment variables. Default to reserved to keep existing behavior.
+    let range_proof_strategy = match env::var("RANGE_PROOF_STRATEGY") {
+        Ok(strategy) if strategy.to_lowercase() == "hosted" => FulfillmentStrategy::Hosted,
+        _ => FulfillmentStrategy::Reserved,
+    };
+    let agg_proof_strategy = match env::var("AGG_PROOF_STRATEGY") {
+        Ok(strategy) if strategy.to_lowercase() == "hosted" => FulfillmentStrategy::Hosted,
+        _ => FulfillmentStrategy::Reserved,
+    };
+
+    // Set the aggregation proof type based on environment variable. Default to groth16.
+    let agg_proof_mode = match env::var("AGG_PROOF_MODE") {
+        Ok(proof_type) if proof_type.to_lowercase() == "plonk" => SP1ProofMode::Plonk,
+        _ => SP1ProofMode::Groth16,
+    };
+
+    // defaults to false, but can be set to true to never make succinct prover network requests
+    let local_proving_only = match env::var("LOCAL_PROVING_ONLY") {
+        Ok(on) if on.to_lowercase() == "true" => true,
+        _ => false,
+    };
+
+    // defaults to false, but can be set to true to only make mock requests to a worker
+    let mock_mode = match env::var("MOCK_MODE") {
+        Ok(on) if on.to_lowercase() == "true" => true,
+        _ => false,
+    };
+
+    // retries for requests to internal and external prover networks
+    let prover_network_retries: usize = match env::var("PROVER_NETWORK_RETRIES") {
+        Ok(retries) => retries
+            .parse()
+            .context("parse PROVER_NETWORK_RETRIES as usize")?,
+        _ => 3,
+    };
+
+    // Worker strikes start at 0 and increment by 1 on every failed request.  When a worker's strikes
+    // are >= this value, the worker is removed from the registry
+    let max_worker_strikes: usize = match env::var("MAX_WORKER_STRIKES") {
+        Ok(strikes) => strikes
+            .parse()
+            .context("parse MAX_WORKER_STRIKES as usize")?,
+        _ => 3,
+    };
+
+    // the amount of proofs to cache on-disk for persistence
+    // Stores the most recent PROOF_CACHE_MAX_SIZE completed proofs
+    // defaults to 10
+    // setting it to 0 disables the cache
+    let proof_cache_size: usize = match env::var("PROOF_CACHE_MAX_SIZE") {
+        Ok(size) => size
+            .parse()
+            .context("parse PROOF_CACHE_MAX_SIZE as usize")?,
+        _ => 10,
+    };
+
+    // set this really high.  We just don't want to run out of memory as this grows over time
+    let proof_request_cache_size: usize = match env::var("PROOF_REQUEST_CACHE_SIZE") {
+        Ok(size) => size
+            .parse()
+            .context("parse PROOF_REQUEST_CACHE_SIZE as usize")?,
+        _ => 100,
+    };
+
+    let proof_cache_directory: String = match env::var("PROOF_CACHE_DIRECTORY") {
+        Ok(dir) => dir,
+        _ => format!("proofs"),
+    };
+
+    let proof_request_cache_client = ProofRequestCacheClient::new(proof_request_cache_size);
+
+    let proof_cache = Arc::new(RwLock::new(
+        ProofCache::new(
+            proof_cache_size,
+            &proof_cache_directory,
+            proof_request_cache_client.clone(),
+        )
+        .context("Create proof cache")?,
+    ));
+
+    let worker_registry_client =
+        WorkerRegistryClient::new(max_worker_strikes, prover_network_retries);
+
+    // Initialize global hashes.
+    let global_hashes = SuccinctProposerConfig {
+        agg_vkey_hash,
+        range_vkey_commitment,
+        rollup_config_hash,
+        range_vk: Arc::new(range_vk),
+        range_pk: Arc::new(range_pk),
+        agg_vk: Arc::new(agg_vk),
+        agg_pk: Arc::new(agg_pk),
+        range_proof_strategy,
+        agg_proof_strategy,
+        agg_proof_mode,
+        network_prover,
+        prover_network_retries,
+        local_proving_only,
+        proof_cache,
+        worker_registry_client,
+        proof_request_cache_client,
+        mock_mode,
+    };
+
+    let app = Router::new()
+        .route("/request_span_proof", post(request_span_proof))
+        .route("/request_agg_proof", post(request_agg_proof))
+        .route("/request_mock_span_proof", post(request_mock_span_proof))
+        .route("/request_mock_agg_proof", post(request_mock_agg_proof))
+        .route("/status/:proof_id", get(get_proof_status))
+        .route("/validate_config", post(validate_config))
+        .route("/worker_ready", post(worker_ready))
+        .route("/workers", get(workers))
+        .layer(DefaultBodyLimit::disable())
+        .layer(RequestBodyLimitLayer::new(102400 * 1024 * 1024))
+        .with_state(global_hashes);
+
+    let port = env::var("PORT").unwrap_or_else(|_| "3000".to_string());
+    let listener = tokio::net::TcpListener::bind(format!("0.0.0.0:{}", port))
+        .await
+        .unwrap();
+
+    info!("Server listening on {}", listener.local_addr().unwrap());
+    axum::serve(listener, app).await?;
+    Ok(())
+}
+
+async fn workers(
+    State(state): State<SuccinctProposerConfig>,
+) -> Result<(StatusCode, Json<Vec<(String, WorkerState)>>), AppError> {
+    let workers = state
+        .worker_registry_client
+        .workers()
+        .await
+        .map_err(|e| AppError(e))?;
+
+    Ok((StatusCode::OK, Json(workers)))
+}
+
+/// Validate the configuration of the L2 Output Oracle.
+async fn validate_config(
+    State(state): State<SuccinctProposerConfig>,
+    Json(payload): Json<ValidateConfigRequest>,
+) -> Result<(StatusCode, Json<ValidateConfigResponse>), AppError> {
+    info!("Received validate config request: {:?}", payload);
+    let fetcher = OPSuccinctDataFetcher::default();
+
+    let address = Address::from_str(&payload.address).unwrap();
+    let l2_output_oracle = L2OutputOracle::new(address, fetcher.l1_provider);
+
+    let agg_vkey = l2_output_oracle.aggregationVkey().call().await?;
+    let range_vkey = l2_output_oracle.rangeVkeyCommitment().call().await?;
+    let rollup_config_hash = l2_output_oracle.rollupConfigHash().call().await?;
+
+    let agg_vkey_valid = agg_vkey.aggregationVkey == state.agg_vkey_hash;
+    let range_vkey_valid = range_vkey.rangeVkeyCommitment == state.range_vkey_commitment;
+    let rollup_config_hash_valid = rollup_config_hash.rollupConfigHash == state.rollup_config_hash;
+
+    Ok((
+        StatusCode::OK,
+        Json(ValidateConfigResponse {
+            rollup_config_hash_valid,
+            agg_vkey_valid,
+            range_vkey_valid,
+        }),
+    ))
+}
+
+/// Request a proof for a span of blocks.
+async fn request_span_proof(
+    State(state): State<SuccinctProposerConfig>,
+    Json(payload): Json<SpanProofRequest>,
+) -> Result<(StatusCode, Json<ProofResponse>), AppError> {
+    info!("Received span proof request: {:?}", payload);
+
+    // First, check if we have the proof locally
+    let proof_cache = state.proof_cache.read().await;
+    let proof_exists_on_disk = proof_cache.proof_exists(&payload);
+    drop(proof_cache);
+
+    let proof_id = if proof_exists_on_disk {
+        info!("Span proof for request {:?} found on disk", payload);
+        // We'll retrieve the proof later in `get_proof_status`.  For now, return a new proof_id to
+        // the proposer
+        B256::random()
+    } else {
+        route_proof(&payload.into(), &state).await?
+    };
+
+    info!("Assigned id {proof_id} to span proof request {:?}", payload);
+
+    // record proof request in the lookup
+    state
+        .proof_request_cache_client
+        .record_proof_request(proof_id, payload.into())
+        .await?;
+
+    Ok((
+        StatusCode::OK,
+        Json(ProofResponse {
+            proof_id: proof_id.to_vec(),
+        }),
+    ))
+}
+
+/// Request an aggregation proof for a set of subproofs.
+async fn request_agg_proof(
+    State(state): State<SuccinctProposerConfig>,
+    Json(payload): Json<AggProofRequest>,
+) -> Result<(StatusCode, Json<ProofResponse>), AppError> {
+    info!("Received agg proof request");
+
+    let generic_payload: GenericProofRequest = payload.into();
+    let proof_id = route_proof(&generic_payload, &state).await?;
+
+    // record proof request in the lookup
+    state
+        .proof_request_cache_client
+        .record_proof_request(proof_id, generic_payload)
+        .await?;
+
+    Ok((
+        StatusCode::OK,
+        Json(ProofResponse {
+            proof_id: proof_id.to_vec(),
+        }),
+    ))
+}
+
+/// Request a mock proof for a span of blocks.
+async fn request_mock_span_proof(
+    State(state): State<SuccinctProposerConfig>,
+    Json(payload): Json<SpanProofRequest>,
+) -> Result<(StatusCode, Json<ProofStatus>), AppError> {
+    info!("Received mock span proof request: {:?}", payload);
+    let fetcher = match OPSuccinctDataFetcher::new_with_rollup_config(RunContext::Docker).await {
+        Ok(f) => f,
+        Err(e) => {
+            error!("Failed to create data fetcher: {}", e);
+            return Err(AppError(e));
+        }
+    };
+
+    let host_args = match fetcher
+        .get_host_args(
+            payload.start,
+            payload.end,
+            None,
+            ProgramType::Multi,
+            CacheMode::DeleteCache,
+        )
+        .await
+    {
+        Ok(cli) => cli,
+        Err(e) => {
+            error!("Failed to get host CLI args: {}", e);
+            return Err(AppError(e));
+        }
+    };
+
+    let start_time = Instant::now();
+    let oracle = start_server_and_native_client(host_args.clone()).await?;
+    let witness_generation_duration = start_time.elapsed();
+
+    let sp1_stdin = match get_proof_stdin(oracle) {
+        Ok(stdin) => stdin,
+        Err(e) => {
+            error!("Failed to get proof stdin: {}", e);
+            return Err(AppError(e));
+        }
+    };
+
+    let start_time = Instant::now();
+
+    // Note(ratan): In a future version of the server which only supports mock proofs, Arc<MockProver> should be used to reduce memory usage.
+    let prover = ProverClient::builder().mock().build();
+    let (pv, report) = prover.execute(RANGE_ELF, &sp1_stdin).run().unwrap();
+    let execution_duration = start_time.elapsed();
+
+    let block_data = fetcher
+        .get_l2_block_data_range(payload.start, payload.end)
+        .await?;
+
+    let l1_head = host_args.kona_args.l1_head;
+    // Get the L1 block number from the L1 head.
+    let l1_block_number = fetcher.get_l1_header(l1_head.into()).await?.number;
+    let stats = ExecutionStats::new(
+        l1_block_number,
+        &block_data,
+        &report,
+        witness_generation_duration.as_secs(),
+        execution_duration.as_secs(),
+    );
+
+    let l2_chain_id = fetcher.get_l2_chain_id().await?;
+    // Save the report to disk.
+    let report_dir = format!("execution-reports/{}", l2_chain_id);
+    if !std::path::Path::new(&report_dir).exists() {
+        fs::create_dir_all(&report_dir)?;
+    }
+
+    let report_path = format!("{}/{}-{}.json", report_dir, payload.start, payload.end);
+    // Write to CSV.
+    let mut csv_writer = csv::Writer::from_path(report_path)?;
+    csv_writer.serialize(&stats)?;
+    csv_writer.flush()?;
+
+    let proof = SP1ProofWithPublicValues::create_mock_proof(
+        &state.range_pk,
+        pv.clone(),
+        SP1ProofMode::Compressed,
+        SP1_CIRCUIT_VERSION,
+    );
+
+    let proof_bytes = bincode::serialize(&proof).unwrap();
+
+    Ok((
+        StatusCode::OK,
+        Json(ProofStatus {
+            fulfillment_status: FulfillmentStatus::Fulfilled.into(),
+            execution_status: ExecutionStatus::UnspecifiedExecutionStatus.into(),
+            proof: proof_bytes,
+        }),
+    ))
+}
+
+/// Request mock aggregation proof.
+async fn request_mock_agg_proof(
+    State(state): State<SuccinctProposerConfig>,
+    Json(payload): Json<AggProofRequest>,
+) -> Result<(StatusCode, Json<ProofStatus>), AppError> {
+    info!("Received mock agg proof request!");
+
+    let mut proofs_with_pv: Vec<SP1ProofWithPublicValues> = payload
+        .subproofs
+        .iter()
+        .map(|sp| bincode::deserialize(sp).unwrap())
+        .collect();
+
+    let boot_infos: Vec<BootInfoStruct> = proofs_with_pv
+        .iter_mut()
+        .map(|proof| proof.public_values.read())
+        .collect();
+
+    let proofs: Vec<SP1Proof> = proofs_with_pv
+        .iter_mut()
+        .map(|proof| proof.proof.clone())
+        .collect();
+
+    let l1_head_bytes = match hex::decode(
+        payload
+            .head
+            .strip_prefix("0x")
+            .expect("Invalid L1 head, no 0x prefix."),
+    ) {
+        Ok(bytes) => bytes,
+        Err(e) => {
+            error!("Failed to decode L1 head: {}", e);
+            return Err(AppError(anyhow::anyhow!("Failed to decode L1 head: {}", e)));
+        }
+    };
+    let l1_head: [u8; 32] = l1_head_bytes.try_into().unwrap();
+
+    let fetcher = match OPSuccinctDataFetcher::new_with_rollup_config(RunContext::Docker).await {
+        Ok(f) => f,
+        Err(e) => {
+            error!("Failed to create data fetcher: {}", e);
+            return Err(AppError(e));
+        }
+    };
+    let headers = match fetcher
+        .get_header_preimages(&boot_infos, l1_head.into())
+        .await
+    {
+        Ok(h) => h,
+        Err(e) => {
+            error!("Failed to get header preimages: {}", e);
+            return Err(AppError(e));
+        }
+    };
+
+    let stdin =
+        match get_agg_proof_stdin(proofs, boot_infos, headers, &state.range_vk, l1_head.into()) {
+            Ok(s) => s,
+            Err(e) => {
+                error!("Failed to get aggregation proof stdin: {}", e);
+                return Err(AppError(e));
+            }
+        };
+
+    // Note(ratan): In a future version of the server which only supports mock proofs, Arc<MockProver> should be used to reduce memory usage.
+    let prover = ProverClient::builder().mock().build();
+    let proof = match prover
+        .prove(&state.agg_pk, &stdin)
+        .mode(state.agg_proof_mode)
+        .deferred_proof_verification(false)
+        .run()
+    {
+        Ok(p) => p,
+        Err(e) => {
+            error!("Failed to generate proof: {}", e);
+            return Err(AppError(e));
+        }
+    };
+
+    Ok((
+        StatusCode::OK,
+        Json(ProofStatus {
+            fulfillment_status: FulfillmentStatus::Fulfilled.into(),
+            execution_status: ExecutionStatus::UnspecifiedExecutionStatus.into(),
+            proof: proof.bytes(),
+        }),
+    ))
+}
+
+/// Get the status of a proof.
+async fn get_proof_status(
+    State(state): State<SuccinctProposerConfig>,
+    Path(proof_id): Path<String>,
+) -> Result<(StatusCode, Json<ProofStatus>), AppError> {
+    info!("Received proof status request: {:?}", proof_id);
+
+    let proof_id_bytes = hex::decode(&proof_id)?;
+    let proof_id = B256::from_slice(&proof_id_bytes);
+
+    // first, check to see if it's a proof we have stored in the cache
+    let proof_cache = state.proof_cache.read().await;
+    if let Some(proof_bytes) = proof_cache
+        .read_proof(&proof_id)
+        .await
+        .context("read proof")?
+    {
+        info!("Found proof {proof_id} on disk cache");
+        return Ok((
+            StatusCode::OK,
+            Json(ProofStatus {
+                fulfillment_status: FulfillmentStatus::Fulfilled.into(),
+                execution_status: ExecutionStatus::Executed.into(),
+                proof: proof_bytes,
+            }),
+        ));
+    }
+    drop(proof_cache);
+
+    // check worker_registry to see if we sent it to the local prover network.
+    let start = Instant::now();
+    let proof_status = state.worker_registry_client.proof_status(proof_id).await?;
+    let proof_status_lookup_time = start.elapsed().as_secs_f64();
+    debug!("Took {proof_status_lookup_time} seconds to get proof status from worker registry");
+
+    // we got a proof status from the worker_registry
+    if let Some(proof_status) = proof_status {
+        // if the proof was lost by the worker network we have to re-request it
+        if proof_status.is_lost() {
+            let proof_status = re_assign_lost_proof(&state, proof_id).await?;
+            return Ok((StatusCode::OK, Json(proof_status)));
+        }
+
+        if proof_status.fulfillment_status == FulfillmentStatus::Fulfilled as i32 {
+            info!("Found completed proof {proof_id} on worker network");
+            write_proof_to_cache(&state, proof_status.proof.clone(), &proof_id)
+                .await
+                .context("worker proof")?;
+            // tell worker_registry to mark this worker as ready for another proof
+            state
+                .worker_registry_client
+                .proof_complete(proof_id)
+                .await?;
+        }
+        // signal to worker_registry that this worker can be assigned new tasks
+        Ok((StatusCode::OK, Json(proof_status)))
+    }
+    // if we're using the prover network
+    else if !state.local_proving_only {
+        let proof_status = get_proof_status_from_network(&state, proof_id).await?;
+        if proof_status.fulfillment_status == FulfillmentStatus::Fulfilled as i32 {
+            info!("Found proof {proof_id} on prover network");
+            write_proof_to_cache(&state, proof_status.proof.clone(), &proof_id)
+                .await
+                .context("worker proof")?;
+        }
+        info!("Found proof status {proof_status} in prover network");
+        Ok((StatusCode::OK, Json(proof_status)))
+    } else {
+        // can't find proof anywhere.  Re-request it
+        info!("Couldn't find proof status in worker registry, cache, or prover network.  Re-requesting proof {proof_id}");
+        // If we're already waiting for a worker to pick up this proof in the `handle_proof_request`
+        // cycle its okay because it'll eventually flush out when 1 worker gets assigned it because
+        // subsequent requests will short circuit return
+        let proof_status = re_assign_lost_proof(&state, proof_id).await?;
+
+        Ok((StatusCode::OK, Json(proof_status)))
+    }
+}
+
+async fn worker_ready(
+    State(state): State<SuccinctProposerConfig>,
+    Json(worker_info): Json<WorkerInfo>,
+) -> Result<(), AppError> {
+    info!("Received worker ready check from {worker_info}");
+
+    let worker_addr = format!("http://{}:{}", worker_info.ip, worker_info.port);
+    debug!(
+        "Sending command to register worker with address {}",
+        worker_addr
+    );
+
+    state
+        .worker_registry_client
+        .worker_ready(worker_addr)
+        .await?;
+
+    Ok(())
+}
+
+// if LOCAL_PROVING_ONLY is set to true, request a proof to our worker network
+// otherwise, make a request to the prover network.  If this request
+// fails PROVER_NETWORK_RETRIES times, then fall back to local prover network
+async fn route_proof(
+    proof_request: &GenericProofRequest,
+    state: &SuccinctProposerConfig,
+) -> Result<B256, AppError> {
+    if state.local_proving_only {
+        info!("Attempting to route proof to the local prover network");
+        let proof_id = B256::random();
+        state
+            .worker_registry_client
+            .assign_proof_request(proof_id, proof_request.clone(), state.mock_mode)
+            .await?;
+        Ok(proof_id)
+    } else {
+        let prover_network_response = match proof_request {
+            GenericProofRequest::Span(payload) => {
+                info!("Making network request for span proof");
+                let sp1_stdin = generate_span_sp1_stdin(payload).await?;
+                let network_request = || {
+                    state
+                        .network_prover
+                        .prove(&state.range_pk, &sp1_stdin)
+                        .compressed()
+                        .strategy(state.range_proof_strategy)
+                        .skip_simulation(true)
+                        .cycle_limit(1_000_000_000_000)
+                        .request_async()
+                };
+                request_with_retries(state.prover_network_retries, network_request).await
+            }
+            GenericProofRequest::Agg(payload) => {
+                info!("Making network request for agg proof");
+                let sp1_stdin = generate_agg_sp1_stdin(payload, &state.range_vk).await?;
+                let network_request = || {
+                    state
+                        .network_prover
+                        .prove(&state.agg_pk, &sp1_stdin)
+                        .mode(state.agg_proof_mode)
+                        .strategy(state.agg_proof_strategy)
+                        .request_async()
+                };
+                request_with_retries(state.prover_network_retries, network_request).await
+            }
+        };
+
+        match prover_network_response {
+            // success
+            Ok(proof_id) => Ok(proof_id),
+            // failed after PROVER_NETWORK_RETRIES retries, route the proof to the local prover
+            // network
+            Err(_) => {
+                error!("Prover network request for proof failed. Attempting to route proof to the internal prover network");
+
+                let proof_id = B256::random();
+                state
+                    .worker_registry_client
+                    .assign_proof_request(proof_id, proof_request.clone(), state.mock_mode)
+                    .await?;
+                Ok(proof_id)
+            }
+        }
+    }
+}
+
+async fn write_proof_to_cache(
+    state: &SuccinctProposerConfig,
+    proof_bytes: Vec<u8>,
+    proof_id: &B256,
+) -> Result<()> {
+    let mut proof_cache = state.proof_cache.write().await;
+
+    proof_cache
+        .write_proof(proof_bytes, proof_id)
+        .await
+        .context("write locally constructed proof")?;
+
+    Ok(())
+}
+
+async fn generate_span_sp1_stdin(payload: &SpanProofRequest) -> Result<SP1Stdin> {
+    let fetcher = match OPSuccinctDataFetcher::new_with_rollup_config(RunContext::Docker).await {
+        Ok(f) => f,
+        Err(e) => {
+            error!("Failed to create data fetcher: {}", e);
+            return Err(e);
+        }
+    };
+    let host_args = match fetcher
+        .get_host_args(
+            payload.start,
+            payload.end,
+            None,
+            ProgramType::Multi,
+            CacheMode::DeleteCache,
+        )
+        .await
+    {
+        Ok(cli) => cli,
+        Err(e) => {
+            error!("Failed to get host CLI args: {}", e);
+            return Err(anyhow::anyhow!("Failed to get host CLI args: {}", e));
+        }
+    };
+
+    let mem_kv_store = start_server_and_native_client(host_args).await?;
+
+    match get_proof_stdin(mem_kv_store) {
+        Ok(stdin) => Ok(stdin),
+        Err(e) => {
+            error!("Failed to get proof stdin: {}", e);
+            Err(anyhow::anyhow!("Failed to get proof stdin: {}", e))
+        }
+    }
+}
+
+async fn generate_agg_sp1_stdin(
+    payload: &AggProofRequest,
+    vkey: &SP1VerifyingKey,
+) -> Result<SP1Stdin> {
+    let mut proofs_with_pv: Vec<SP1ProofWithPublicValues> = payload
+        .subproofs
+        .iter()
+        .map(|sp| bincode::deserialize(sp).unwrap())
+        .collect();
+
+    let boot_infos: Vec<BootInfoStruct> = proofs_with_pv
+        .iter_mut()
+        .map(|proof| proof.public_values.read())
+        .collect();
+
+    let proofs: Vec<SP1Proof> = proofs_with_pv
+        .iter_mut()
+        .map(|proof| proof.proof.clone())
+        .collect();
+
+    let l1_head_bytes = match payload.head.strip_prefix("0x") {
+        Some(hex_str) => match hex::decode(hex_str) {
+            Ok(bytes) => bytes,
+            Err(e) => {
+                error!("Failed to decode L1 head hex string: {}", e);
+                return Err(anyhow::anyhow!(
+                    "Failed to decode L1 head hex string: {}",
+                    e
+                ));
+            }
+        },
+        None => {
+            error!("Invalid L1 head format: missing 0x prefix");
+            return Err(anyhow::anyhow!("Invalid L1 head format: missing 0x prefix"));
+        }
+    };
+
+    let l1_head: [u8; 32] = match l1_head_bytes.clone().try_into() {
+        Ok(array) => array,
+        Err(_) => {
+            error!(
+                "Invalid L1 head length: expected 32 bytes, got {}",
+                l1_head_bytes.len()
+            );
+            return Err(anyhow::anyhow!(
+                "Invalid L1 head length: expected 32 bytes, got {}",
+                l1_head_bytes.len()
+            ));
+        }
+    };
+
+    let fetcher = match OPSuccinctDataFetcher::new_with_rollup_config(RunContext::Docker).await {
+        Ok(f) => f,
+        Err(e) => {
+            error!("Failed to create fetcher: {}", e);
+            return Err(anyhow::anyhow!("Failed to create fetcher: {}", e));
+        }
+    };
+
+    let headers = match fetcher
+        .get_header_preimages(&boot_infos, l1_head.into())
+        .await
+    {
+        Ok(h) => h,
+        Err(e) => {
+            error!("Failed to get header preimages: {}", e);
+            return Err(anyhow::anyhow!("Failed to get header preimages: {}", e));
+        }
+    };
+
+    match get_agg_proof_stdin(proofs, boot_infos, headers, vkey, l1_head.into()) {
+        Ok(s) => Ok(s),
+        Err(e) => {
+            error!("Failed to get agg proof stdin: {}", e);
+            Err(anyhow::anyhow!("Failed to get agg proof stdin: {}", e))
+        }
+    }
+}
+
+async fn get_proof_status_from_network(
+    state: &SuccinctProposerConfig,
+    proof_id: B256,
+) -> Result<ProofStatus> {
+    let network_proof_status_request = || state.network_prover.get_proof_status(proof_id);
+
+    // try to get the proof status, returning a failure to the proposer if it seems that the prover
+    // network is down
+    let (status, maybe_proof) = match request_with_retries(
+        state.prover_network_retries,
+        network_proof_status_request,
+    )
+    .await
+    {
+        Ok(res) => res,
+        Err(err) => {
+            error!(
+                "Prover network request for status of proof {} failed: {err}",
+                proof_id
+            );
+
+            // When the proposer sees a FulfillmentStatus of Unfulfillable it will retry the proof
+            // request.  If the prover network is really down, the new request will fail inside
+            // `request_agg/span_proof()` and will be re-routed as a local proof
+            return Ok(ProofStatus {
+                fulfillment_status: FulfillmentStatus::Unfulfillable.into(),
+                // if execution status is also `Unexecutable`, then the retry proof request
+                // will be half the block size.  This keeps the request the same
+                execution_status: ExecutionStatus::UnspecifiedExecutionStatus.into(),
+                proof: vec![],
+            });
+        }
+    };
+
+    // Check the deadline.
+    if status.deadline
+        < SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs()
+    {
+        error!(
+            "Proof request timed out on the server. Default timeout is set to 4 hours. Returning status as Unfulfillable."
+        );
+        return Ok(ProofStatus {
+            fulfillment_status: FulfillmentStatus::Unfulfillable.into(),
+            execution_status: ExecutionStatus::Executed.into(),
+            proof: vec![],
+        });
+    }
+
+    let fulfillment_status = status.fulfillment_status;
+    let execution_status = status.execution_status;
+    if fulfillment_status == FulfillmentStatus::Fulfilled as i32 {
+        let proof: SP1ProofWithPublicValues = maybe_proof.unwrap();
+
+        let proof_bytes = match proof.proof {
+            SP1Proof::Compressed(_) => {
+                // If it's a compressed proof, we need to serialize the entire struct with bincode.
+                // Note: We're re-serializing the entire struct with bincode here, but this is fine
+                // because we're on localhost and the size of the struct is small.
+                bincode::serialize(&proof).unwrap()
+            }
+            SP1Proof::Groth16(_) => {
+                // If it's a groth16 proof, we need to get the proof bytes that we put on-chain.
+                proof.bytes()
+            }
+            SP1Proof::Plonk(_) => {
+                // If it's a plonk proof, we need to get the proof bytes that we put on-chain.
+                proof.bytes()
+            }
+            _ => {
+                log::error!("unknown proof type: {proof:?}");
+                return Err(anyhow::anyhow!("unknown proof type: {proof:?}"));
+            }
+        };
+
+        return Ok(ProofStatus {
+            fulfillment_status,
+            execution_status,
+            proof: proof_bytes,
+        });
+    } else if fulfillment_status == FulfillmentStatus::Unfulfillable as i32 {
+        return Ok(ProofStatus {
+            fulfillment_status,
+            execution_status,
+            proof: vec![],
+        });
+    }
+
+    Ok(ProofStatus {
+        fulfillment_status,
+        execution_status,
+        proof: vec![],
+    })
+}
+
+async fn re_assign_lost_proof(
+    state: &SuccinctProposerConfig,
+    proof_id: B256,
+) -> Result<ProofStatus, AppError> {
+    error!("proof was lost, re-assigning it to a worker");
+    let proof_request = match state
+        .proof_request_cache_client
+        .lookup_proof_request(&proof_id)
+        .await
+    {
+        Ok(Some(proof_request)) => proof_request,
+        Ok(None) => {
+            return Err(AppError(anyhow!("Couldn't find proof request {proof_id}")));
+        }
+        Err(e) => {
+            return Err(AppError(anyhow!(
+                "Error looking up proof request {proof_id}: {e}"
+            )));
+        }
+    };
+
+    info!("Attempting to route lost proof to the local prover network");
+
+    state
+        .worker_registry_client
+        .assign_proof_request(proof_id, proof_request.clone(), state.mock_mode)
+        .await?;
+
+    Ok(ProofStatus {
+        fulfillment_status: FulfillmentStatus::Requested.into(),
+        execution_status: ExecutionStatus::Unexecuted.into(),
+        proof: vec![],
+    })
+}
